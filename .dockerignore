@@ -11,6 +11,9 @@
 *.iws
 .codeartsdoer
 
+# Desktop (Electron) 源码，镜像内不需要；避免把 3GB 的 desktop/node_modules 塞进构建上下文
+desktop/
+
 # Build outputs
 target/
 dist/

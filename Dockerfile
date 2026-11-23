@@ -29,11 +29,11 @@ COPY .mvn/ .mvn/
 COPY mvnw mvnw.cmd pom.xml ./
 RUN chmod +x mvnw
 
-# 复制前端构建产物到 static 目录
-COPY --from=frontend-build /app/vue-code/../src/main/resources/static src/main/resources/static/
-
 # 复制后端源码
 COPY src/ src/
+
+# 复制前端构建产物到 static 目录（放在 COPY src/ 之后，避免被仓库内旧静态资源覆盖）
+COPY --from=frontend-build /app/vue-code/../src/main/resources/static src/main/resources/static/
 
 # 构建 JAR（跳过测试）
 RUN ./mvnw clean package -DskipTests
@@ -45,6 +45,9 @@ LABEL maintainer="IAMLZY"
 LABEL description="XianYuAssistant - 闲鱼自动化管理系统"
 
 WORKDIR /app
+
+# 安装验证码绘图所需的字体支持（Java AWT 在 Alpine 下需要 fontconfig 与字体包）
+RUN apk add --no-cache fontconfig ttf-dejavu
 
 # 创建数据目录
 RUN mkdir -p /app/dbdata /app/logs /app/ms-playwright
