@@ -166,7 +166,11 @@ try {
     try {
         Invoke-Checked -Executable 'mvn.cmd' -Arguments @('--batch-mode', 'clean', 'package')
         Reset-BuildDirectory -Path $backendRoot
-        Copy-Item -LiteralPath (Join-Path $projectRoot 'target\XianYuAssistant-2.0.3.jar') -Destination (Join-Path $backendRoot 'app.jar')
+        $builtJar = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'target') -Filter '*.jar' | Where-Object { $_.Name -notlike '*.original' } | Select-Object -First 1
+        if ($null -eq $builtJar) {
+            throw 'Spring Boot jar not found under target\'
+        }
+        Copy-Item -LiteralPath $builtJar.FullName -Destination (Join-Path $backendRoot 'app.jar')
 
         $classPathFile = Join-Path $cacheRoot 'maven-classpath.txt'
         Invoke-Checked -Executable 'mvn.cmd' -Arguments @(

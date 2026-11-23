@@ -1,6 +1,6 @@
 {
   "name": "xianyu-assistant-desktop",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "private": true,
   "description": "Windows desktop shell for XianYu Assistant",
   "main": "src/main.js",

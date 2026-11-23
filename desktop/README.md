@@ -14,8 +14,8 @@ powershell -ExecutionPolicy Bypass -File .\desktop\scripts\build.ps1 -UseChinaMi
 
 输出位于 `desktop\dist`：
 
-- `闲鱼助手-2.0.3-x64-setup.exe`：安装版，可创建桌面和开始菜单快捷方式。
-- `闲鱼助手-2.0.3-x64-portable.exe`：免安装版，直接双击运行。
+- `闲鱼助手-2.0.4-x64-setup.exe`：安装版，可创建桌面和开始菜单快捷方式。
+- `闲鱼助手-2.0.4-x64-portable.exe`：免安装版，直接双击运行。
 
 ## 用户数据
 
