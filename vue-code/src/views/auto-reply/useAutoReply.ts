@@ -2,7 +2,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getAccountList } from '@/api/account'
 import { getGoodsList, updateAutoReplyStatus, getAutoReplyConfig, updateAutoReplyConfig, getAutoReplyRecords } from '@/api/goods'
-import { chatWithAI, chatTestWithAI, putNewDataToRAG, queryRAGData, deleteRAGData, saveFixedMaterial, getFixedMaterial, syncDetailToFixedMaterial } from '@/api/ai'
+import { chatWithAI, chatTestWithAI, putNewDataToRAG, queryRAGData, deleteRAGData, saveFixedMaterial, getFixedMaterial, syncDetailToFixedMaterial, saveSystemPrompt, getSystemPrompt } from '@/api/ai'
 import type { RAGDataItem } from '@/api/ai'
 import type { AutoReplyRecord } from '@/api/goods'
 import { showSuccess, showError, showInfo } from '@/utils'
@@ -53,6 +53,11 @@ export function useAutoReply() {
   // Upload data form
   const dataContent = ref('')
   const uploading = ref(false)
+
+  // Goods-level system prompt
+  const systemPrompt = ref('')
+  const systemPromptSaving = ref(false)
+  const systemPromptExpanded = ref(true)
 
   // Fixed material
   const fixedMaterial = ref('')
@@ -262,8 +267,60 @@ export function useAutoReply() {
 
     // 加载自动回复配置
     loadConfig()
+    // 加载商品级系统提示词
+    loadSystemPrompt()
     // 加载固定资料
     loadFixedMaterial()
+  }
+
+  // Load goods-level system prompt
+  const loadSystemPrompt = async () => {
+    if (!selectedGoods.value || !selectedAccountId.value) return
+
+    try {
+      const response = await getSystemPrompt({
+        accountId: selectedAccountId.value,
+        goodsId: selectedGoods.value.item.xyGoodId
+      })
+      const data = await response.json()
+      if (data.code === 0 || data.code === 200) {
+        systemPrompt.value = data.data?.systemPrompt || ''
+        systemPromptExpanded.value = !systemPrompt.value
+      }
+    } catch (error: any) {
+      console.error('加载系统提示词失败:', error)
+    }
+  }
+
+  // Save goods-level system prompt
+  const handleSaveSystemPrompt = async () => {
+    if (!selectedGoods.value || !selectedAccountId.value) return
+
+    systemPromptSaving.value = true
+    try {
+      const response = await saveSystemPrompt({
+        accountId: selectedAccountId.value,
+        goodsId: selectedGoods.value.item.xyGoodId,
+        systemPrompt: systemPrompt.value
+      })
+      const data = await response.json()
+      if (data.code === 0 || data.code === 200) {
+        showSuccess('系统提示词保存成功')
+      } else {
+        showError(data.msg || '保存失败')
+      }
+    } catch (error: any) {
+      if (!error.messageShown) {
+        showError('保存系统提示词失败: ' + error.message)
+      }
+    } finally {
+      systemPromptSaving.value = false
+    }
+  }
+
+  // Toggle system prompt expanded
+  const toggleSystemPromptExpanded = () => {
+    systemPromptExpanded.value = !systemPromptExpanded.value
   }
 
   // Load fixed material
@@ -1035,6 +1092,12 @@ export function useAutoReply() {
     if (!chatInput.value.trim()) return
     if (chatSending.value) return
 
+    // 把本次之前的对话作为历史一起发给后端，测试页才能验证“记不记得上文”
+    const history = chatMessages.value
+      .filter((m) => m.content && !m.loading)
+      .slice(-20)
+      .map((m) => ({ role: m.role, content: m.content }))
+
     const userMsg: ChatMessage = {
       id: genId(),
       role: 'user',
@@ -1062,7 +1125,8 @@ export function useAutoReply() {
       const response = await chatTestWithAI({
         msg: inputText,
         goodsId: selectedGoods.value.item.xyGoodId,
-        accountId: selectedAccountId.value!
+        accountId: selectedAccountId.value!,
+        history
       })
 
       if (!response.ok) {
@@ -1272,6 +1336,12 @@ export function useAutoReply() {
     rightTab,
     dataContent,
     uploading,
+    systemPrompt,
+    systemPromptSaving,
+    systemPromptExpanded,
+    handleSaveSystemPrompt,
+    toggleSystemPromptExpanded,
+
     fixedMaterial,
     fixedMaterialSaving,
     fixedMaterialSyncing,

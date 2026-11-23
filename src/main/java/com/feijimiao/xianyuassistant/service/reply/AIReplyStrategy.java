@@ -32,7 +32,17 @@ public class AIReplyStrategy implements ReplyStrategy {
     private XianyuGoodsInfoMapper goodsInfoMapper;
 
     @Override
+    public boolean needsContext() {
+        return true;
+    }
+
+    @Override
     public ReplyResult execute(List<ChatMessageData> messageList) {
+        return execute(messageList, null);
+    }
+
+    @Override
+    public ReplyResult execute(List<ChatMessageData> messageList, String contextMessages) {
         ChatMessageData lastMessage = messageList.get(messageList.size() - 1);
         Long accountId = lastMessage.getXianyuAccountId();
         String xyGoodsId = lastMessage.getXyGoodsId();
@@ -45,13 +55,15 @@ public class AIReplyStrategy implements ReplyStrategy {
         try {
             XianyuGoodsConfig goodsConfig = goodsConfigMapper.selectByAccountAndGoodsId(accountId, xyGoodsId);
             String fixedMaterial = goodsConfig != null ? goodsConfig.getFixedMaterial() : null;
+            String systemPrompt = goodsConfig != null ? goodsConfig.getSystemPrompt() : null;
 
             XianyuGoodsInfo goodsInfo = goodsInfoMapper.selectOne(
                     new LambdaQueryWrapper<XianyuGoodsInfo>().eq(XianyuGoodsInfo::getXyGoodId, xyGoodsId)
             );
             String goodsDetail = goodsInfo != null ? goodsInfo.getDetailInfo() : null;
 
-            RAGReplyResult result = aiService.chatByRAGWithFixedMaterial(buyerMessage, xyGoodsId, fixedMaterial, goodsDetail);
+            RAGReplyResult result = aiService.chatByRAGWithFixedMaterial(
+                    buyerMessage, xyGoodsId, contextMessages, systemPrompt, fixedMaterial, goodsDetail);
 
             if (result != null && result.getReplyContent() != null && !result.getReplyContent().trim().isEmpty()) {
                 return ReplyResult.of(Collections.singletonList(

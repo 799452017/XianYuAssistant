@@ -54,6 +54,11 @@ public class XianyuGoodsConfig {
     private Integer humanInterventionMinutes;
     
     /**
+     * 商品级系统提示词（与全局系统提示词叠加生效，为空则只用全局）
+     */
+    private String systemPrompt;
+
+    /**
      * 固定资料（用于AI自动回复）
      */
     private String fixedMaterial;

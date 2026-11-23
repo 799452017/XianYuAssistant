@@ -28,7 +28,7 @@ public class AutoReplyBackupHandler implements DataBackupHandler {
     @Override
     public Map<String, Object> exportData() {
         List<Map<String, Object>> configs = jdbcTemplate.queryForList(
-                "SELECT c.xy_goods_id, c.xianyu_auto_reply_on, c.xianyu_auto_reply_context_on, c.fixed_material, a.unb " +
+                "SELECT c.xy_goods_id, c.xianyu_auto_reply_on, c.xianyu_auto_reply_context_on, c.system_prompt, c.fixed_material, a.unb " +
                 "FROM xianyu_goods_config c " +
                 "LEFT JOIN xianyu_account a ON c.xianyu_account_id = a.id " +
                 "WHERE c.xianyu_auto_reply_on IS NOT NULL");
@@ -41,6 +41,7 @@ public class AutoReplyBackupHandler implements DataBackupHandler {
             map.put("xyGoodsId", config.get("xy_goods_id"));
             map.put("autoReplyOn", config.get("xianyu_auto_reply_on"));
             map.put("autoReplyContextOn", config.get("xianyu_auto_reply_context_on"));
+            map.put("systemPrompt", config.get("system_prompt"));
             map.put("fixedMaterial", config.get("fixed_material"));
             result.add(map);
         }
@@ -79,6 +80,7 @@ public class AutoReplyBackupHandler implements DataBackupHandler {
 
                 Integer autoReplyOn = map.get("autoReplyOn") != null ? ((Number) map.get("autoReplyOn")).intValue() : null;
                 Integer autoReplyContextOn = map.get("autoReplyContextOn") != null ? ((Number) map.get("autoReplyContextOn")).intValue() : null;
+                String systemPrompt = (String) map.get("systemPrompt");
                 String fixedMaterial = (String) map.get("fixedMaterial");
 
                 List<Map<String, Object>> existing = jdbcTemplate.queryForList(
@@ -87,12 +89,12 @@ public class AutoReplyBackupHandler implements DataBackupHandler {
 
                 if (existing.isEmpty()) {
                     jdbcTemplate.update(
-                            "INSERT INTO xianyu_goods_config (xianyu_account_id, xy_goods_id, xianyu_auto_reply_on, xianyu_auto_reply_context_on, fixed_material) VALUES (?, ?, ?, ?, ?)",
-                            accountId, xyGoodsId, autoReplyOn, autoReplyContextOn, fixedMaterial);
+                            "INSERT INTO xianyu_goods_config (xianyu_account_id, xy_goods_id, xianyu_auto_reply_on, xianyu_auto_reply_context_on, system_prompt, fixed_material) VALUES (?, ?, ?, ?, ?, ?)",
+                            accountId, xyGoodsId, autoReplyOn, autoReplyContextOn, systemPrompt, fixedMaterial);
                 } else {
                     jdbcTemplate.update(
-                            "UPDATE xianyu_goods_config SET xianyu_auto_reply_on = ?, xianyu_auto_reply_context_on = ?, fixed_material = ? WHERE xianyu_account_id = ? AND xy_goods_id = ?",
-                            autoReplyOn, autoReplyContextOn, fixedMaterial, accountId, xyGoodsId);
+                            "UPDATE xianyu_goods_config SET xianyu_auto_reply_on = ?, xianyu_auto_reply_context_on = ?, system_prompt = ?, fixed_material = ? WHERE xianyu_account_id = ? AND xy_goods_id = ?",
+                            autoReplyOn, autoReplyContextOn, systemPrompt, fixedMaterial, accountId, xyGoodsId);
                 }
             } catch (Exception e) {
                 log.warn("[AutoReplyBackup] 导入单条自动回复配置失败: {}", e.getMessage());

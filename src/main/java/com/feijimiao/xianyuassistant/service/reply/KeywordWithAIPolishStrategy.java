@@ -41,7 +41,17 @@ public class KeywordWithAIPolishStrategy implements ReplyStrategy {
     private XianyuGoodsInfoMapper goodsInfoMapper;
 
     @Override
+    public boolean needsContext() {
+        return true;
+    }
+
+    @Override
     public ReplyResult execute(List<ChatMessageData> messageList) {
+        return execute(messageList, null);
+    }
+
+    @Override
+    public ReplyResult execute(List<ChatMessageData> messageList, String contextMessages) {
         ChatMessageData lastMessage = messageList.get(messageList.size() - 1);
         Long accountId = lastMessage.getXianyuAccountId();
         String xyGoodsId = lastMessage.getXyGoodsId();
@@ -57,7 +67,7 @@ public class KeywordWithAIPolishStrategy implements ReplyStrategy {
             return executeKeywordWithPolish(accountId, matchedRules);
         }
 
-        return executeAIReply(accountId, xyGoodsId, buyerMessage);
+        return executeAIReply(accountId, xyGoodsId, buyerMessage, contextMessages);
     }
 
     private ReplyResult executeKeywordWithPolish(Long accountId, List<KeywordReplyRuleBO> matchedRules) {
@@ -119,17 +129,19 @@ public class KeywordWithAIPolishStrategy implements ReplyStrategy {
         return result;
     }
 
-    private ReplyResult executeAIReply(Long accountId, String xyGoodsId, String buyerMessage) {
+    private ReplyResult executeAIReply(Long accountId, String xyGoodsId, String buyerMessage, String contextMessages) {
         try {
             XianyuGoodsConfig goodsConfig = goodsConfigMapper.selectByAccountAndGoodsId(accountId, xyGoodsId);
             String fixedMaterial = goodsConfig != null ? goodsConfig.getFixedMaterial() : null;
+            String systemPrompt = goodsConfig != null ? goodsConfig.getSystemPrompt() : null;
 
             XianyuGoodsInfo goodsInfo = goodsInfoMapper.selectOne(
                     new LambdaQueryWrapper<XianyuGoodsInfo>().eq(XianyuGoodsInfo::getXyGoodId, xyGoodsId)
             );
             String goodsDetail = goodsInfo != null ? goodsInfo.getDetailInfo() : null;
 
-            RAGReplyResult ragResult = aiService.chatByRAGWithFixedMaterial(buyerMessage, xyGoodsId, fixedMaterial, goodsDetail);
+            RAGReplyResult ragResult = aiService.chatByRAGWithFixedMaterial(
+                    buyerMessage, xyGoodsId, contextMessages, systemPrompt, fixedMaterial, goodsDetail);
 
             if (ragResult != null && ragResult.getReplyContent() != null && !ragResult.getReplyContent().trim().isEmpty()) {
                 return ReplyResult.of(Collections.singletonList(

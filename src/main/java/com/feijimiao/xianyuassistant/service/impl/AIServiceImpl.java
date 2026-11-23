@@ -1,6 +1,7 @@
 package com.feijimiao.xianyuassistant.service.impl;
 
 import com.feijimiao.xianyuassistant.config.rag.DynamicAIChatClientManager;
+import com.feijimiao.xianyuassistant.constants.ChatMessageConstants;
 import com.feijimiao.xianyuassistant.config.rag.DynamicVectorStoreManager;
 import com.feijimiao.xianyuassistant.service.AIService;
 import com.feijimiao.xianyuassistant.service.SysSettingService;
@@ -45,6 +46,13 @@ public class AIServiceImpl implements AIService {
 
     /** 默认系统提示词 */
     private static final String DEFAULT_SYS_PROMPT = "你是一个闲鱼卖家，你叫肥极喵，不要回复的像AI，简短回答\n参考相关信息回答,不要乱回答,不知道就换不同语气回复提示用户详细点询问";
+
+    /** 携带历史上下文时追加到系统提示词后的连贯性要求 */
+    private static final String CONTEXT_CONSISTENCY_PROMPT = "\n\n【对话连贯性要求】下面已提供本次会话的历史对话：\n"
+            + "1. 买家重复提问或追问时，必须与你之前给出的答复保持一致，不要改口、不要自相矛盾；\n"
+            + "2. 已经说清楚的信息不要整段重复，简短确认即可；\n"
+            + "3. 标为“卖家本人”的内容是卖家亲自回复的，视为已经答复过，不要推翻或重复；\n"
+            + "4. 不要复述“您刚才问的是……”这类机器人式开场。";
 
     /** 默认相似度阈值 */
     private static final double DEFAULT_SIMILARITY_THRESHOLD = 0.1;
@@ -342,6 +350,18 @@ public class AIServiceImpl implements AIService {
 
     @Override
     public Flux<String> chatByRAGWithFixedMaterialStream(String msg, String goodsId, String fixedMaterial, String goodsDetail) {
+        return chatByRAGWithFixedMaterialStream(msg, goodsId, null, null, fixedMaterial, goodsDetail);
+    }
+
+    @Override
+    public Flux<String> chatByRAGWithFixedMaterialStream(String msg, String goodsId, String goodsSystemPrompt,
+                                                         String fixedMaterial, String goodsDetail) {
+        return chatByRAGWithFixedMaterialStream(msg, goodsId, null, goodsSystemPrompt, fixedMaterial, goodsDetail);
+    }
+
+    @Override
+    public Flux<String> chatByRAGWithFixedMaterialStream(String msg, String goodsId, String contextMessages,
+                                                         String goodsSystemPrompt, String fixedMaterial, String goodsDetail) {
         long startTime = System.currentTimeMillis();
         log.info("[AI Chat Test Stream] 开始流式对话: goodsId={}, msg={}, fixedMaterial={}, goodsDetail={}", 
                 goodsId, msg, fixedMaterial != null, goodsDetail != null);
@@ -383,15 +403,26 @@ public class AIServiceImpl implements AIService {
 
         StringBuilder systemMsgBuilder = new StringBuilder();
         systemMsgBuilder.append(sysPrompt);
-        
+
+        if (goodsSystemPrompt != null && !goodsSystemPrompt.trim().isEmpty()) {
+            systemMsgBuilder.append("\n\n【本商品专属要求】\n").append(goodsSystemPrompt.trim());
+        }
+
         if (fixedMaterial != null && !fixedMaterial.isEmpty()) {
             systemMsgBuilder.append("\n\n固定资料：\n").append(fixedMaterial);
         }
         
-        String finalSystemPrompt = systemMsgBuilder.toString();
+        boolean hasHistory = contextMessages != null && !contextMessages.trim().isEmpty();
+        String finalSystemPrompt = hasHistory
+                ? systemMsgBuilder.append(CONTEXT_CONSISTENCY_PROMPT).toString()
+                : systemMsgBuilder.toString();
 
         StringBuilder userMsgBuilder = new StringBuilder();
-        
+
+        if (hasHistory) {
+            userMsgBuilder.append("历史对话：\n").append(renderHistoryPrompt(contextMessages)).append("\n");
+        }
+
         if (!context.isEmpty()) {
             userMsgBuilder.append("参考资料：\n").append(context).append("\n\n");
         }
@@ -416,11 +447,17 @@ public class AIServiceImpl implements AIService {
 
     @Override
     public RAGReplyResult chatByRAGWithFixedMaterial(String msg, String goodsId, String fixedMaterial, String goodsDetail) {
-        return chatByRAGWithFixedMaterial(msg, goodsId, null, fixedMaterial, goodsDetail);
+        return chatByRAGWithFixedMaterial(msg, goodsId, null, null, fixedMaterial, goodsDetail);
     }
 
     @Override
     public RAGReplyResult chatByRAGWithFixedMaterial(String msg, String goodsId, String contextMessages, String fixedMaterial, String goodsDetail) {
+        return chatByRAGWithFixedMaterial(msg, goodsId, contextMessages, null, fixedMaterial, goodsDetail);
+    }
+
+    @Override
+    public RAGReplyResult chatByRAGWithFixedMaterial(String msg, String goodsId, String contextMessages,
+                                                     String goodsSystemPrompt, String fixedMaterial, String goodsDetail) {
         RAGReplyResult result = new RAGReplyResult();
         
         ChatClient chatClient = dynamicAIChatClientManager.getChatClient();
@@ -474,12 +511,20 @@ public class AIServiceImpl implements AIService {
 
         StringBuilder systemMsgBuilder = new StringBuilder();
         systemMsgBuilder.append(sysPrompt);
-        
+
+        // 商品级系统提示词：叠加在全局提示词之后（越靠后权重越高），实现"一商品一套话术"
+        if (goodsSystemPrompt != null && !goodsSystemPrompt.trim().isEmpty()) {
+            systemMsgBuilder.append("\n\n【本商品专属要求】\n").append(goodsSystemPrompt.trim());
+        }
+
         if (fixedMaterial != null && !fixedMaterial.isEmpty()) {
             systemMsgBuilder.append("\n\n固定资料：\n").append(fixedMaterial);
         }
         
-        String finalSystemPrompt = systemMsgBuilder.toString();
+        boolean hasHistory = contextMessages != null && !contextMessages.trim().isEmpty();
+        String finalSystemPrompt = hasHistory
+                ? systemMsgBuilder.append(CONTEXT_CONSISTENCY_PROMPT).toString()
+                : systemMsgBuilder.toString();
 
         StringBuilder userMsgBuilder = new StringBuilder();
         
@@ -497,19 +542,13 @@ public class AIServiceImpl implements AIService {
         try {
             String replyContent;
             
-            if (contextMessages != null && !contextMessages.isEmpty()) {
-                String[] lines = contextMessages.split("\n");
+            if (hasHistory) {
                 StringBuilder historyPrompt = new StringBuilder();
-                historyPrompt.append("历史对话：\n");
-                for (String line : lines) {
-                    if (line.startsWith("user: ")) {
-                        historyPrompt.append("用户：").append(line.substring(6)).append("\n");
-                    } else if (line.startsWith("assistant: ")) {
-                        historyPrompt.append("助手：").append(line.substring(11)).append("\n");
-                    }
-                }
+                historyPrompt.append("历史对话：\n").append(renderHistoryPrompt(contextMessages));
                 historyPrompt.append("\n").append(userMessage);
-                
+
+                log.info("[AI Chat FixedMaterial] 携带历史对话: 条数={}, 长度={}",
+                        contextMessages.split("\n").length, contextMessages.length());
                 replyContent = chatClient.prompt()
                         .system(finalSystemPrompt)
                         .user(historyPrompt.toString())
@@ -531,6 +570,31 @@ public class AIServiceImpl implements AIService {
 
         result.setHitDetails(hitDetails);
         return result;
+    }
+
+    /**
+     * 把 role: content 形式的历史对话渲染成中文标签文本
+     *
+     * <p>用户/助手/卖家本人分别渲染为「用户：」「助手：」「卖家本人：」。</p>
+     */
+    private String renderHistoryPrompt(String contextMessages) {
+        StringBuilder sb = new StringBuilder();
+        String userPrefix = ChatMessageConstants.ContextRole.USER + ": ";
+        String assistantPrefix = ChatMessageConstants.ContextRole.ASSISTANT + ": ";
+        String sellerPrefix = ChatMessageConstants.ContextRole.SELLER + ": ";
+        for (String line : contextMessages.split("\n")) {
+            if (line.startsWith(userPrefix)) {
+                sb.append(ChatMessageConstants.ContextRole.USER_LABEL)
+                        .append(line.substring(userPrefix.length())).append("\n");
+            } else if (line.startsWith(assistantPrefix)) {
+                sb.append(ChatMessageConstants.ContextRole.ASSISTANT_LABEL)
+                        .append(line.substring(assistantPrefix.length())).append("\n");
+            } else if (line.startsWith(sellerPrefix)) {
+                sb.append(ChatMessageConstants.ContextRole.SELLER_LABEL)
+                        .append(line.substring(sellerPrefix.length())).append("\n");
+            }
+        }
+        return sb.toString();
     }
 
     /**

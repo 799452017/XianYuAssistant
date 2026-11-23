@@ -21,8 +21,8 @@ public interface XianyuGoodsConfigMapper {
     /**
      * 插入配置
      */
-    @Insert("INSERT INTO xianyu_goods_config (xianyu_account_id, xianyu_goods_id, xy_goods_id, xianyu_auto_delivery_on, xianyu_auto_reply_on, xianyu_auto_reply_context_on, xianyu_keyword_reply_on, human_intervention_on, human_intervention_minutes, fixed_material) " +
-            "VALUES (#{xianyuAccountId}, #{xianyuGoodsId}, #{xyGoodsId}, #{xianyuAutoDeliveryOn}, #{xianyuAutoReplyOn}, #{xianyuAutoReplyContextOn}, #{xianyuKeywordReplyOn}, #{humanInterventionOn}, #{humanInterventionMinutes}, #{fixedMaterial})")
+    @Insert("INSERT INTO xianyu_goods_config (xianyu_account_id, xianyu_goods_id, xy_goods_id, xianyu_auto_delivery_on, xianyu_auto_reply_on, xianyu_auto_reply_context_on, xianyu_keyword_reply_on, human_intervention_on, human_intervention_minutes, system_prompt, fixed_material) " +
+            "VALUES (#{xianyuAccountId}, #{xianyuGoodsId}, #{xyGoodsId}, #{xianyuAutoDeliveryOn}, #{xianyuAutoReplyOn}, #{xianyuAutoReplyContextOn}, #{xianyuKeywordReplyOn}, #{humanInterventionOn}, #{humanInterventionMinutes}, #{systemPrompt}, #{fixedMaterial})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(XianyuGoodsConfig config);
     
@@ -35,9 +35,16 @@ public interface XianyuGoodsConfigMapper {
             "xianyu_keyword_reply_on = #{xianyuKeywordReplyOn}, " +
             "human_intervention_on = #{humanInterventionOn}, " +
             "human_intervention_minutes = #{humanInterventionMinutes}, " +
+            "system_prompt = #{systemPrompt}, " +
             "fixed_material = #{fixedMaterial} WHERE id = #{id}")
     int update(XianyuGoodsConfig config);
     
+    /**
+     * 更新商品级系统提示词
+     */
+    @Update("UPDATE xianyu_goods_config SET system_prompt = #{systemPrompt} WHERE xianyu_account_id = #{accountId} AND xy_goods_id = #{xyGoodsId}")
+    int updateSystemPrompt(@Param("accountId") Long accountId, @Param("xyGoodsId") String xyGoodsId, @Param("systemPrompt") String systemPrompt);
+
     /**
      * 更新固定资料
      */

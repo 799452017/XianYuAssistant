@@ -45,7 +45,7 @@ export function chatWithAI(data: ChatWithAIReq): Promise<Response> {
 }
 
 // AI 对话测试（与自动回复流程一致）
-export function chatTestWithAI(data: { accountId: number; goodsId: string; msg: string }): Promise<Response> {
+export function chatTestWithAI(data: { accountId: number; goodsId: string; msg: string; history?: Array<{ role: string; content: string }> }): Promise<Response> {
   return fetch('/ai/chatTest', {
     method: 'POST',
     headers: authHeaders(),
@@ -96,6 +96,24 @@ export function getAIStatus(): Promise<Response> {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify({})
+  })
+}
+
+// 保存商品级系统提示词
+export function saveSystemPrompt(data: { accountId: number; goodsId: string; systemPrompt: string }): Promise<Response> {
+  return fetch('/ai/saveSystemPrompt', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(data)
+  })
+}
+
+// 获取商品级系统提示词
+export function getSystemPrompt(data: { accountId: number; goodsId: string }): Promise<Response> {
+  return fetch('/ai/getSystemPrompt', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(data)
   })
 }
 

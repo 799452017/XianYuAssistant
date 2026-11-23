@@ -1,5 +1,6 @@
 package com.feijimiao.xianyuassistant.service.impl;
 
+import com.feijimiao.xianyuassistant.constants.ChatMessageConstants;
 import com.feijimiao.xianyuassistant.context.UserContext;
 import com.feijimiao.xianyuassistant.entity.XianyuChatMessage;
 import com.feijimiao.xianyuassistant.mapper.XianyuChatMessageMapper;
@@ -28,16 +29,16 @@ public class SentMessageSaveServiceImpl implements SentMessageSaveService {
     private AccountService accountService;
     
     /** 手动回复 contentType */
-    private static final int CONTENT_TYPE_MANUAL_REPLY = 999;
-    
+    private static final int CONTENT_TYPE_MANUAL_REPLY = ChatMessageConstants.ContentType.MANUAL_REPLY;
+
     /** AI助手回复 contentType */
-    private static final int CONTENT_TYPE_AI_ASSISTANT_REPLY = 888;
+    private static final int CONTENT_TYPE_AI_ASSISTANT_REPLY = ChatMessageConstants.ContentType.AI_ASSISTANT_REPLY;
 
     /** 图片回复 contentType */
-    private static final int CONTENT_TYPE_IMAGE_REPLY = 997;
+    private static final int CONTENT_TYPE_IMAGE_REPLY = ChatMessageConstants.ContentType.IMAGE_REPLY;
 
     /** AI自动回复图片 contentType */
-    private static final int CONTENT_TYPE_AI_IMAGE_REPLY = 887;
+    private static final int CONTENT_TYPE_AI_IMAGE_REPLY = ChatMessageConstants.ContentType.AI_IMAGE_REPLY;
     
     @Override
     @Async

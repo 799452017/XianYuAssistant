@@ -38,6 +38,11 @@ const {
   rightTab,
   dataContent,
   uploading,
+  systemPrompt,
+  systemPromptSaving,
+  systemPromptExpanded,
+  handleSaveSystemPrompt,
+  toggleSystemPromptExpanded,
   fixedMaterial,
   fixedMaterialSaving,
   fixedMaterialSyncing,
@@ -688,6 +693,46 @@ onMounted(() => {
 
           <!-- ====== 知识资料视图 ====== -->
           <template v-if="replyModeTab === 'ai' && rightTab === 'data'">
+            <!-- Goods-level system prompt section -->
+            <div class="ar__config-section">
+              <div class="ar__config-section-header" @click="toggleSystemPromptExpanded">
+                <div class="ar__config-section-title-row">
+                  <IconChevronDown class="ar__config-section-chevron" :class="{ 'ar__config-section-chevron--collapsed': !systemPromptExpanded }" />
+                  <div class="ar__config-section-title">系统提示词</div>
+                  <span v-if="systemPrompt" class="ar__config-section-badge">已配置</span>
+                </div>
+              </div>
+
+              <div v-show="systemPromptExpanded" class="ar__config-section-body">
+                <div class="ar__toggle-hint" style="margin-bottom: 8px;">
+                  本商品专属的回复规则，会叠加在全局系统提示词之后；留空则只用全局提示词
+                </div>
+
+                <textarea
+                  v-model="systemPrompt"
+                  class="ar__textarea"
+                  placeholder="例如：本商品只推年卡，不推周卡；价格以本商品固定资料为准"
+                  maxlength="5000"
+                ></textarea>
+                <div class="ar__textarea-footer">
+                  <span class="ar__textarea-hint">系统提示词随商品保存</span>
+                  <span class="ar__textarea-count">{{ systemPrompt.length }} / 5000</span>
+                </div>
+
+                <div class="ar__save-row" style="margin-bottom: 16px;">
+                  <button
+                    class="btn btn--primary"
+                    :class="{ 'btn--loading': systemPromptSaving }"
+                    :disabled="systemPromptSaving"
+                    @click="handleSaveSystemPrompt"
+                  >
+                    <IconCheck />
+                    保存系统提示词
+                  </button>
+                </div>
+              </div>
+            </div>
+
             <!-- Fixed material section -->
             <div class="ar__config-section">
               <div class="ar__config-section-header" @click="toggleFixedMaterialExpanded">

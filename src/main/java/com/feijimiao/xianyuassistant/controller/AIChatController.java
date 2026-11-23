@@ -56,11 +56,14 @@ public class AIChatController {
     public Flux<String> chatTestWithAi(@RequestBody ChatTestReqDTO req) {
         String fixedMaterial = null;
         String goodsDetail = null;
+        String systemPrompt = null;
+        String contextMessages = buildHistoryContext(req.getHistory());
         
         if (req.getAccountId() != null && req.getGoodsId() != null) {
             XianyuGoodsConfig config = goodsConfigMapper.selectByAccountAndGoodsId(req.getAccountId(), req.getGoodsId());
             if (config != null) {
                 fixedMaterial = config.getFixedMaterial();
+                systemPrompt = config.getSystemPrompt();
             }
             
             String detailInfo = goodsInfoService.getDetailInfoByGoodsId(req.getGoodsId());
@@ -69,7 +72,43 @@ public class AIChatController {
             }
         }
         
-        return aiService.chatByRAGWithFixedMaterialStream(req.getMsg(), req.getGoodsId(), fixedMaterial, goodsDetail);
+        return aiService.chatByRAGWithFixedMaterialStream(req.getMsg(), req.getGoodsId(), contextMessages,
+                systemPrompt, fixedMaterial, goodsDetail);
+    }
+
+    /**
+     * 把测试页传来的历史消息拼成 {@code role: content} 文本（最多 20 条、2000 字）
+     *
+     * <p>让"AI回答测试"与真实自动回复一致：都能带上多轮对话。</p>
+     */
+    private String buildHistoryContext(List<HistoryItem> history) {
+        if (history == null || history.isEmpty()) {
+            return null;
+        }
+        int start = Math.max(0, history.size() - 20);
+        StringBuilder sb = new StringBuilder();
+        int count = 0;
+        for (int i = start; i < history.size(); i++) {
+            HistoryItem item = history.get(i);
+            if (item == null || item.getContent() == null || item.getContent().trim().isEmpty()) {
+                continue;
+            }
+            String role = "assistant".equalsIgnoreCase(item.getRole()) ? "assistant" : "user";
+            sb.append(role).append(": ").append(item.getContent().replace("\n", " ").trim()).append("\n");
+            count++;
+        }
+        if (count == 0) {
+            return null;
+        }
+        String text = sb.toString();
+        if (text.length() > 2000) {
+            text = text.substring(text.length() - 2000);
+            int nl = text.indexOf('\n');
+            if (nl >= 0) {
+                text = text.substring(nl + 1);
+            }
+        }
+        return text.trim();
     }
 
     /**
@@ -118,8 +157,40 @@ public class AIChatController {
 
     @PostMapping("/saveFixedMaterial")
     public ResultObject<?> saveFixedMaterial(@RequestBody FixedMaterialReqDTO req) {
-        goodsConfigMapper.updateFixedMaterial(req.getAccountId(), req.getGoodsId(), req.getFixedMaterial());
+        if (req.getAccountId() == null || req.getGoodsId() == null || req.getGoodsId().isBlank()) {
+            return ResultObject.validateFailed("账号ID和商品ID不能为空");
+        }
+        int updated = goodsConfigMapper.updateFixedMaterial(req.getAccountId(), req.getGoodsId(), req.getFixedMaterial());
+        if (updated == 0) {
+            XianyuGoodsConfig config = createDefaultGoodsConfig(req.getAccountId(), req.getGoodsId());
+            config.setFixedMaterial(req.getFixedMaterial());
+            goodsConfigMapper.insert(config);
+        }
         return ResultObject.success(null);
+    }
+
+    @PostMapping("/saveSystemPrompt")
+    public ResultObject<?> saveSystemPrompt(@RequestBody SystemPromptReqDTO req) {
+        if (req.getAccountId() == null || req.getGoodsId() == null || req.getGoodsId().isBlank()) {
+            return ResultObject.validateFailed("账号ID和商品ID不能为空");
+        }
+        int updated = goodsConfigMapper.updateSystemPrompt(req.getAccountId(), req.getGoodsId(), req.getSystemPrompt());
+        if (updated == 0) {
+            XianyuGoodsConfig config = createDefaultGoodsConfig(req.getAccountId(), req.getGoodsId());
+            config.setSystemPrompt(req.getSystemPrompt());
+            goodsConfigMapper.insert(config);
+        }
+        return ResultObject.success(null);
+    }
+
+    @PostMapping("/getSystemPrompt")
+    public ResultObject<SystemPromptRespDTO> getSystemPrompt(@RequestBody SystemPromptReqDTO req) {
+        XianyuGoodsConfig config = goodsConfigMapper.selectByAccountAndGoodsId(req.getAccountId(), req.getGoodsId());
+        SystemPromptRespDTO resp = new SystemPromptRespDTO();
+        if (config != null) {
+            resp.setSystemPrompt(config.getSystemPrompt());
+        }
+        return ResultObject.success(resp);
     }
 
     @PostMapping("/getFixedMaterial")
@@ -134,13 +205,34 @@ public class AIChatController {
 
     @PostMapping("/syncDetailToFixedMaterial")
     public ResultObject<?> syncDetailToFixedMaterial(@RequestBody FixedMaterialReqDTO req) {
+        if (req.getAccountId() == null || req.getGoodsId() == null || req.getGoodsId().isBlank()) {
+            return ResultObject.validateFailed("账号ID和商品ID不能为空");
+        }
         String detailInfo = goodsInfoService.getDetailInfoByGoodsId(req.getGoodsId());
         if (detailInfo != null && !detailInfo.isEmpty()) {
-            goodsConfigMapper.updateFixedMaterial(req.getAccountId(), req.getGoodsId(), detailInfo);
+            int updated = goodsConfigMapper.updateFixedMaterial(req.getAccountId(), req.getGoodsId(), detailInfo);
+            if (updated == 0) {
+                XianyuGoodsConfig config = createDefaultGoodsConfig(req.getAccountId(), req.getGoodsId());
+                config.setFixedMaterial(detailInfo);
+                goodsConfigMapper.insert(config);
+            }
             return ResultObject.success(null);
         } else {
             return ResultObject.failed("商品详情为空，无法同步");
         }
+    }
+
+    private XianyuGoodsConfig createDefaultGoodsConfig(Long accountId, String goodsId) {
+        XianyuGoodsConfig config = new XianyuGoodsConfig();
+        config.setXianyuAccountId(accountId);
+        config.setXyGoodsId(goodsId);
+        config.setXianyuAutoDeliveryOn(0);
+        config.setXianyuAutoReplyOn(0);
+        config.setXianyuAutoReplyContextOn(1);
+        config.setXianyuKeywordReplyOn(0);
+        config.setHumanInterventionOn(0);
+        config.setHumanInterventionMinutes(10);
+        return config;
     }
 
     public static class FixedMaterialReqDTO {
@@ -156,6 +248,26 @@ public class AIChatController {
         public void setFixedMaterial(String fixedMaterial) { this.fixedMaterial = fixedMaterial; }
     }
 
+    public static class SystemPromptReqDTO {
+        private Long accountId;
+        private String goodsId;
+        private String systemPrompt;
+
+        public Long getAccountId() { return accountId; }
+        public void setAccountId(Long accountId) { this.accountId = accountId; }
+        public String getGoodsId() { return goodsId; }
+        public void setGoodsId(String goodsId) { this.goodsId = goodsId; }
+        public String getSystemPrompt() { return systemPrompt; }
+        public void setSystemPrompt(String systemPrompt) { this.systemPrompt = systemPrompt; }
+    }
+
+    public static class SystemPromptRespDTO {
+        private String systemPrompt;
+
+        public String getSystemPrompt() { return systemPrompt; }
+        public void setSystemPrompt(String systemPrompt) { this.systemPrompt = systemPrompt; }
+    }
+
     public static class FixedMaterialRespDTO {
         private String fixedMaterial;
 
@@ -163,10 +275,22 @@ public class AIChatController {
         public void setFixedMaterial(String fixedMaterial) { this.fixedMaterial = fixedMaterial; }
     }
 
+    public static class HistoryItem {
+        private String role;
+        private String content;
+
+        public String getRole() { return role; }
+        public void setRole(String role) { this.role = role; }
+        public String getContent() { return content; }
+        public void setContent(String content) { this.content = content; }
+    }
+
     public static class ChatTestReqDTO {
         private Long accountId;
         private String goodsId;
         private String msg;
+        /** 测试页里的历史对话（role=user/assistant） */
+        private List<HistoryItem> history;
 
         public Long getAccountId() { return accountId; }
         public void setAccountId(Long accountId) { this.accountId = accountId; }
@@ -174,6 +298,8 @@ public class AIChatController {
         public void setGoodsId(String goodsId) { this.goodsId = goodsId; }
         public String getMsg() { return msg; }
         public void setMsg(String msg) { this.msg = msg; }
+        public List<HistoryItem> getHistory() { return history; }
+        public void setHistory(List<HistoryItem> history) { this.history = history; }
     }
 
     /**
