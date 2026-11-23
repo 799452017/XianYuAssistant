@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { checkUserExists, login, register } from '@/api/auth'
+import { checkUserExists, login, register, getCaptcha } from '@/api/auth'
 import { setAuthToken, isLoggedIn } from '@/utils/request'
 
 // 'checking' -> 'login' -> 'register'
@@ -13,6 +13,25 @@ const confirmPassword = ref('')
 
 const showPassword = ref(false)
 const showConfirmPassword = ref(false)
+
+// 图形验证码：id 原样回传，image 是 data URI
+const captchaId = ref('')
+const captchaImage = ref('')
+const captchaCode = ref('')
+const loginError = ref('')
+
+async function loadCaptcha() {
+  try {
+    const res = await getCaptcha()
+    if (res.code === 200 && res.data) {
+      captchaId.value = res.data.id
+      captchaImage.value = res.data.image
+      captchaCode.value = ''
+    }
+  } catch (e) {
+    console.error('[Login] load captcha failed:', e)
+  }
+}
 
 onMounted(async () => {
   // 已登录则跳转首页
@@ -31,6 +50,7 @@ onMounted(async () => {
     } else {
       mode.value = 'login'
     }
+    await loadCaptcha()
   } catch (e) {
     console.error('[Login] checkUserExists failed:', e)
     mode.value = 'login'
@@ -38,19 +58,33 @@ onMounted(async () => {
 })
 
 async function handleLogin() {
+  loginError.value = ''
   if (!username.value.trim()) return
   if (!password.value) return
+  if (!captchaCode.value.trim()) {
+    loginError.value = '请输入图形验证码'
+    return
+  }
   loading.value = true
   try {
-    const res = await login({ username: username.value.trim(), password: password.value })
+    const res = await login({
+      username: username.value.trim(),
+      password: password.value,
+      captchaId: captchaId.value,
+      captchaCode: captchaCode.value.trim()
+    })
     if (res.code === 200 && res.data && res.data.token) {
       setAuthToken(res.data.token, res.data.username)
       window.location.href = '/dashboard'
     } else {
+      loginError.value = res?.message || '登录失败'
       console.error('[Login] login response invalid:', res)
+      loadCaptcha()
     }
-  } catch (e) {
+  } catch (e: any) {
+    loginError.value = e?.message || '登录失败，请重试'
     console.error('[Login] login failed:', e)
+    loadCaptcha()
   } finally {
     loading.value = false
   }
@@ -141,6 +175,34 @@ function handleKeydown(e: KeyboardEvent) {
             </button>
           </div>
         </div>
+
+        <div class="login-field">
+          <label class="login-label">验证码</label>
+          <div class="login-captcha-row">
+            <div class="login-input-wrap">
+              <input
+                v-model="captchaCode"
+                type="text"
+                class="login-input"
+                placeholder="请输入右侧 4 位验证码"
+                maxlength="6"
+                autocomplete="off"
+                :disabled="loading"
+                @keydown="handleKeydown"
+              />
+            </div>
+            <img
+              v-if="captchaImage"
+              :src="captchaImage"
+              class="login-captcha-img"
+              title="看不清？点击换一张"
+              @click="loadCaptcha"
+            />
+            <button v-else class="login-captcha-refresh" :disabled="loading" @click="loadCaptcha">加载验证码</button>
+          </div>
+        </div>
+
+        <p v-if="loginError" class="login-error">{{ loginError }}</p>
 
         <button class="login-btn" :disabled="loading" @click="handleLogin">
           <span v-if="loading" class="login-btn-spinner"></span>
@@ -464,5 +526,40 @@ function handleKeydown(e: KeyboardEvent) {
     height: 44px;
     font-size: 15px;
   }
+}
+.login-captcha-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.login-captcha-row .login-input-wrap {
+  flex: 1;
+}
+
+.login-captcha-img {
+  height: 44px;
+  width: 132px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  object-fit: cover;
+  background: #f5f6f8;
+}
+
+.login-captcha-refresh {
+  height: 44px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px dashed rgba(0, 0, 0, 0.2);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.login-error {
+  margin: -4px 0 8px;
+  font-size: 12px;
+  color: #e5484d;
 }
 </style>

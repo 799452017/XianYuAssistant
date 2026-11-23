@@ -28,6 +28,9 @@ public class LoginController {
     @Autowired
     private AuthService authService;
 
+    @Autowired
+    private com.feijimiao.xianyuassistant.service.CaptchaService captchaService;
+
     /**
      * 检查是否有用户（决定显示登录还是注册）
      */
@@ -102,6 +105,12 @@ public class LoginController {
             }
             if (reqDTO.getPassword() == null || reqDTO.getPassword().trim().isEmpty()) {
                 return ResultObject.validateFailed("密码不能为空");
+            }
+
+            // 图形验证码：不依赖 IP，换代理也绕不过去。错一次计一次失败，和密码错误同一个窗口。
+            if (!captchaService.verify(reqDTO.getCaptchaId(), reqDTO.getCaptchaCode())) {
+                authService.recordLoginFailure(ip);
+                return ResultObject.failed("验证码错误或已过期，请刷新后重试");
             }
 
             String deviceId = request.getHeader("User-Agent");

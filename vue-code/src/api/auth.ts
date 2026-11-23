@@ -8,8 +8,16 @@ export function checkUserExists() {
   })
 }
 
+/** 图形验证码：{ id, image(data URI) } */
+export function getCaptcha() {
+  return request<{ id: string; image: string }>({
+    url: '/login/captcha',
+    method: 'get'
+  })
+}
+
 /** 登录 */
-export function login(data: { username: string; password: string }) {
+export function login(data: { username: string; password: string; captchaId?: string; captchaCode?: string }) {
   return request<{ token: string; username: string }>({
     url: '/login/login',
     method: 'post',
