@@ -483,37 +483,12 @@ public class TokenRefreshServiceImpl implements TokenRefreshService {
      * 1. 保持每分钟检查一次（与Python一致）
      * 2. 添加随机间隔（3-8秒），避免多账号同时请求
      */
-    @Scheduled(fixedDelay = 60 * 1000, initialDelay = 60 * 1000)
+    /**
+     * WebSocket Token 定时续期已统一收口至 WebSocketServiceImpl 的静默无损续期任务（10-14小时随机间隔），
+     * 避免此处每分钟全局任务并发清空 tokenExpireTime 与活跃连接产生竞态冲突。
+     */
     public void scheduledRefreshWebSocketToken() {
-        try {
-            // 与Python完全一致：每分钟检查一次，判断是否需要刷新（1小时）
-            log.debug("🔄 检查WebSocket token是否需要刷新...");
-
-            List<XianyuAccount> accounts = accountMapper.selectList(null);
-
-            for (XianyuAccount account : accounts) {
-                if (account.getStatus() == 1) { // 只刷新正常状态的账号
-                    // 检查是否需要刷新（提前1小时刷新，与Python一致）
-                    if (needsRefresh(account.getId())) {
-                        log.info("🔄 账号{}的WebSocket token即将过期，开始刷新...", account.getId());
-                        boolean success = refreshWebSocketToken(account.getId());
-
-                        if (success) {
-                            log.info("✅ 账号{}的WebSocket token刷新成功", account.getId());
-                        } else {
-                            log.warn("⚠️ 账号{}的WebSocket token刷新失败，将在下次检查时重试", account.getId());
-                        }
-
-                        // 随机间隔3-8秒，避免频繁请求
-                        int randomInterval = 3000 + new java.util.Random().nextInt(5001);
-                        Thread.sleep(randomInterval);
-                    }
-                }
-            }
-
-        } catch (Exception e) {
-            log.error("定时检查WebSocket token失败", e);
-        }
+        // 已收口至 WebSocketServiceImpl.startTokenRefresh 统一管理
     }
     
     /**

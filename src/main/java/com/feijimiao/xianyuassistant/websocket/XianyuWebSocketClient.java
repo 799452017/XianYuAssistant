@@ -34,7 +34,7 @@ public class XianyuWebSocketClient extends WebSocketClient {
     
     // 消息处理并发控制（参考Python的_handle_message_with_semaphore）
     private final Semaphore messageSemaphore = new Semaphore(100); // 最多100个并发消息处理（参考Python）
-    private final ExecutorService messageExecutor = Executors.newFixedThreadPool(10);
+    private final ExecutorService messageExecutor;
     
     // 消息处理器
     private WebSocketMessageHandler messageHandler;
@@ -48,6 +48,10 @@ public class XianyuWebSocketClient extends WebSocketClient {
 
     // 等待响应的Future（mid -> CompletableFuture<code>）
     private final ConcurrentHashMap<String, CompletableFuture<Integer>> pendingResponses = new ConcurrentHashMap<>();
+
+    // 等待 /reg 注册结果的Future（200=成功，401=Token失效，-1=连接被关闭）
+    private final CompletableFuture<Integer> registrationFuture = new CompletableFuture<>();
+    private volatile boolean registered = false;
     
     // 注册成功回调
     private Runnable onRegistrationSuccess;
@@ -68,6 +72,40 @@ public class XianyuWebSocketClient extends WebSocketClient {
         super(serverUri, headers);
         this.accountId = accountId;
         this.displayNameUtils = displayNameUtils;
+        this.messageExecutor = Executors.newFixedThreadPool(10, r -> {
+            Thread t = new Thread(r, "ws-msg-" + accountId);
+            t.setDaemon(true);
+            return t;
+        });
+        // 关键：关闭 Java-WebSocket 默认的 60 秒底层 Ping 超时强断检测
+        // 闲鱼/钉钉网关采用应用层 {"lwp":"/!"} 心跳协议，底层 Ping 易造成误杀断连
+        this.setConnectionLostTimeout(0);
+    }
+
+    /**
+     * 幂等释放客户端内部线程池资源（防止握手超时或未进入 onClose 时泄漏）
+     */
+    public void shutdownResources() {
+        if (messageExecutor != null && !messageExecutor.isShutdown()) {
+            messageExecutor.shutdown();
+            log.debug("{}消息处理线程池已关闭", logPrefix());
+        }
+    }
+
+    /**
+     * 等待 /reg 注册响应
+     *
+     * @param timeoutMs 超时毫秒数
+     * @return 200=注册成功，401=Token失效，-1=连接已断开，0=等待超时但底层仍处于打开状态
+     */
+    public int awaitRegistration(long timeoutMs) {
+        try {
+            return registrationFuture.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            return isConnected() ? 0 : -1;
+        } catch (Exception e) {
+            return -1;
+        }
     }
     
     /**
@@ -274,19 +312,29 @@ public class XianyuWebSocketClient extends WebSocketClient {
                 // 检查是否是401错误（Token失效）
                 if (code != null && (code.equals(401) || "401".equals(code.toString()))) {
                     log.error("【账号{}】❌ Token失效(401)，需要重新获取Token并重连", accountId);
+                    registrationFuture.complete(401);
                     
-                    // 触发Token失效回调
-                    if (onTokenExpired != null) {
+                    // 仅当已完成初始注册进入运行期后，才触发异步重连回调
+                    // 若在初次握手注册阶段收到401，由 connectWebSocket 同步清Token重试，避免竞态
+                    if (registered && onTokenExpired != null) {
                         try {
                             log.info("【账号{}】触发Token失效回调，准备重新获取Token...", accountId);
                             onTokenExpired.run();
                         } catch (Exception e) {
                             log.error("【账号{}】Token失效回调执行失败", accountId, e);
                         }
-                    } else {
-                        log.warn("【账号{}】未设置Token失效回调，无法自动重连", accountId);
+                    } else if (!registered) {
+                        log.info("【账号{}】初始注册阶段收到401，交由启动流程同步换新Token重试", accountId);
                     }
                     return; // 不再继续处理
+                }
+
+                // 收到任何合法非401服务端消息，均视为连接存活，刷新心跳存活时间
+                if (onHeartbeatResponse != null) {
+                    try {
+                        onHeartbeatResponse.run();
+                    } catch (Exception ignored) {
+                    }
                 }
                 
                 // 检查是否是心跳响应（参考Python的handle_heartbeat_response）
@@ -304,11 +352,16 @@ public class XianyuWebSocketClient extends WebSocketClient {
                         sessionId = headers.get("sid").toString();
                         log.info("【账号{}】已保存会话ID: {}", accountId, sessionId);
                     }
-                    if (headers != null && headers.containsKey("reg-sid")) {
-                        log.info("【账号{}】✅ 注册成功，reg-sid: {}", accountId, headers.get("reg-sid"));
+                    if (headers != null && (headers.containsKey("reg-sid") || headers.containsKey("sid"))) {
+                        if (headers.containsKey("reg-sid")) {
+                            log.info("【账号{}】✅ 注册成功，reg-sid: {}", accountId, headers.get("reg-sid"));
+                        }
+                        boolean firstRegister = !registered;
+                        registered = true;
+                        registrationFuture.complete(200);
                         
                         // 触发注册成功回调（保存Token）
-                        if (onRegistrationSuccess != null) {
+                        if (firstRegister && onRegistrationSuccess != null) {
                             try {
                                 log.info("【账号{}】触发注册成功回调，准备保存Token...", accountId);
                                 onRegistrationSuccess.run();
@@ -473,15 +526,13 @@ public class XianyuWebSocketClient extends WebSocketClient {
     @Override
     public void onClose(int code, String reason, boolean remote) {
         isConnected = false;
+        registrationFuture.complete(-1);
         String closeType = remote ? "服务器" : "客户端";
         log.info("{}WebSocket连接关闭 - 关闭方: {}, 代码: {}, 原因: {}", 
                 logPrefix(), closeType, code, reason);
         
         // 关闭消息处理线程池
-        if (messageExecutor != null && !messageExecutor.isShutdown()) {
-            messageExecutor.shutdown();
-            log.debug("{}消息处理线程池已关闭", logPrefix());
-        }
+        shutdownResources();
         
         // 触发连接关闭回调（参考Python的finally块中重连逻辑）
         // 但如果是主动关闭（如Token刷新重连），则不触发回调，由调用方自行处理重连

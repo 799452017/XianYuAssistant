@@ -38,6 +38,9 @@ build/
 *.db
 *.db-journal
 /logs/
+*.log
+*.pid
+.debug-run.pid
 /nul
 /vue-code/nul
 /demo/

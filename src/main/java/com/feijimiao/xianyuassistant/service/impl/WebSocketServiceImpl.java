@@ -80,6 +80,15 @@ public class WebSocketServiceImpl implements WebSocketService {
     
     // Token刷新任务
     private final Map<Long, ScheduledFuture<?>> tokenRefreshTasks = new ConcurrentHashMap<>();
+
+    // Token静默刷新失败后的重试任务（受控管理，stop时一并取消）
+    private final Map<Long, ScheduledFuture<?>> tokenRefreshRetryTasks = new ConcurrentHashMap<>();
+
+    // 下次Token刷新目标时间（秒级时间戳，10-14小时随机）
+    private final Map<Long, Long> nextTokenRefreshDeadlines = new ConcurrentHashMap<>();
+
+    // 账号级连接操作锁，防止手动连接与后台重连并发互踢
+    private final Map<Long, Object> connectionLocks = new ConcurrentHashMap<>();
     
     // 心跳响应时间记录
     private final Map<Long, Long> lastHeartbeatResponseTimes = new ConcurrentHashMap<>();
@@ -117,20 +126,36 @@ public class WebSocketServiceImpl implements WebSocketService {
      */
     private static final String WEBSOCKET_URL = "wss://wss-goofish.dingtalk.com/";
 
+    private Object getConnectionLock(Long accountId) {
+        return connectionLocks.computeIfAbsent(accountId, k -> new Object());
+    }
+
     @Override
     public boolean startWebSocket(Long accountId) {
+        synchronized (getConnectionLock(accountId)) {
+            return startWebSocketInternal(accountId, false);
+        }
+    }
+
+    private boolean startWebSocketInternal(Long accountId, boolean retriedAfter401) {
         try {
-            log.info("启动WebSocket连接: accountId={}", accountId);
+            log.info("启动WebSocket连接: accountId={}, retriedAfter401={}", accountId, retriedAfter401);
+
+            // 主动启动连接时先取消挂起的退避重连任务，防止重连定时器稍后将新连接踢掉
+            Future<?> pendingReconnect = reconnectTasks.remove(accountId);
+            if (pendingReconnect != null && !pendingReconnect.isDone()) {
+                pendingReconnect.cancel(false);
+            }
 
             // 检查是否已经连接
             if (webSocketClients.containsKey(accountId)) {
                 XianyuWebSocketClient existingClient = webSocketClients.get(accountId);
-                if (existingClient.isConnected()) {
+                if (existingClient != null && existingClient.isConnected()) {
                     log.info("WebSocket已连接: accountId={}", accountId);
                     return true;
                 } else {
                     // 关闭旧连接
-                    stopWebSocket(accountId);
+                    stopWebSocketInternal(accountId);
                 }
             }
 
@@ -169,11 +194,21 @@ public class WebSocketServiceImpl implements WebSocketService {
             log.info("accessToken获取成功: accountId={}, token长度={}", accountId, accessToken.length());
             
             // 调用通用连接方法
-            return connectWebSocket(accountId, cookieStr, deviceId, accessToken, unb);
+            int connectResult = connectWebSocketWithCode(accountId, cookieStr, deviceId, accessToken, unb);
+            if (connectResult == 401 && !retriedAfter401) {
+                log.warn("【账号{}】旧Token注册返回401，已自动清除旧Token，立即使用最新Cookie重新获取Token并重连...", accountId);
+                tokenService.clearToken(accountId);
+                return startWebSocketInternal(accountId, true);
+            }
+            return connectResult == 200;
 
         } catch (com.feijimiao.xianyuassistant.exception.CaptchaRequiredException e) {
             log.warn("启动WebSocket需要滑块验证: accountId={}, url={}", accountId, e.getCaptchaUrl());
             throw e; // 重新抛出，让Controller处理
+        } catch (com.feijimiao.xianyuassistant.exception.CookieNotFoundException
+                 | com.feijimiao.xianyuassistant.exception.CookieExpiredException
+                 | com.feijimiao.xianyuassistant.exception.TokenInvalidException e) {
+            throw e;
         } catch (Exception e) {
             log.error("启动WebSocket失败: accountId={}", accountId, e);
             return false;
@@ -182,24 +217,25 @@ public class WebSocketServiceImpl implements WebSocketService {
 
     @Override
     public boolean startWebSocketWithToken(Long accountId, String accessToken) {
-        try {
-            log.info("========== 使用手动Token启动WebSocket连接 ==========");
-            log.info("【账号{}】accountId={}", accountId, accountId);
-            log.info("【账号{}】accessToken长度={}", accountId, accessToken != null ? accessToken.length() : 0);
-            log.info("【账号{}】accessToken前50字符={}", accountId, 
-                    accessToken != null && accessToken.length() > 50 ? accessToken.substring(0, 50) + "..." : accessToken);
+        synchronized (getConnectionLock(accountId)) {
+            return startWebSocketWithTokenInternal(accountId, accessToken);
+        }
+    }
 
-            // 检查是否已经连接
+    private boolean startWebSocketWithTokenInternal(Long accountId, String accessToken) {
+        try {
+            log.info("========== 使用指定Token启动WebSocket连接 ==========");
+            log.info("【账号{}】accountId={}, accessToken长度={}", accountId, accountId, accessToken != null ? accessToken.length() : 0);
+
+            Future<?> pendingReconnect = reconnectTasks.remove(accountId);
+            if (pendingReconnect != null && !pendingReconnect.isDone()) {
+                pendingReconnect.cancel(false);
+            }
+
+            // 调用方已显式传入新 accessToken，若存在旧连接则一律先平滑关闭再切换为新连接
             if (webSocketClients.containsKey(accountId)) {
-                XianyuWebSocketClient existingClient = webSocketClients.get(accountId);
-                if (existingClient.isConnected()) {
-                    log.info("【账号{}】WebSocket已连接", accountId);
-                    return true;
-                } else {
-                    // 关闭旧连接
-                    log.info("【账号{}】关闭旧连接", accountId);
-                    stopWebSocket(accountId);
-                }
+                log.info("【账号{}】使用新Token重建连接，先平滑关闭旧WebSocket连接", accountId);
+                stopWebSocketInternal(accountId);
             }
 
             // 获取Cookie
@@ -208,46 +244,33 @@ public class WebSocketServiceImpl implements WebSocketService {
                 log.error("【账号{}】未找到账号Cookie", accountId);
                 throw new com.feijimiao.xianyuassistant.exception.CookieNotFoundException("未找到账号Cookie，请先配置Cookie");
             }
-            log.info("【账号{}】Cookie长度={}", accountId, cookieStr.length());
 
             // 解析Cookie
             Map<String, String> cookies = XianyuSignUtils.parseCookies(cookieStr);
-            log.info("【账号{}】解析到{}个Cookie字段", accountId, cookies.size());
-            
-            // 生成设备ID
             String unb = cookies.get("unb");
             if (unb == null || unb.isEmpty()) {
                 log.error("【账号{}】Cookie中缺少unb字段", accountId);
                 throw new com.feijimiao.xianyuassistant.exception.CookieExpiredException("Cookie中缺少unb字段，Cookie可能已过期或无效");
             }
-            // 使用持久化的设备ID
             String deviceId = accountService.getOrGenerateDeviceId(accountId, unb);
             if (deviceId == null || deviceId.isEmpty()) {
-                log.error("【账号{}】获取或生成设备ID失败", accountId);
                 throw new RuntimeException("无法获取或生成设备ID");
             }
-            log.info("【账号{}】设备ID={}", accountId, deviceId);
-            
-            log.info("【账号{}】准备调用通用连接方法（Token将在注册成功后保存）...", accountId);
-            
-            // 调用通用连接方法
-            boolean result = connectWebSocket(accountId, cookieStr, deviceId, accessToken, unb);
-            
-            log.info("【账号{}】连接结果={}", accountId, result);
-            log.info("========== 手动Token启动流程结束 ==========");
-            
-            return result;
+
+            int result = connectWebSocketWithCode(accountId, cookieStr, deviceId, accessToken, unb);
+            log.info("【账号{}】连接结果code={}", accountId, result);
+            return result == 200;
 
         } catch (Exception e) {
-            log.error("【账号{}】使用手动Token启动WebSocket失败", accountId, e);
+            log.error("【账号{}】使用指定Token启动WebSocket失败", accountId, e);
             return false;
         }
     }
 
     /**
-     * 通用WebSocket连接方法
+     * 通用WebSocket连接方法（返回注册确认状态码：200=成功，401=Token失效，-1=连接失败）
      */
-    private boolean connectWebSocket(Long accountId, String cookieStr, String deviceId, String accessToken, String unb) throws Exception {
+    private int connectWebSocketWithCode(Long accountId, String cookieStr, String deviceId, String accessToken, String unb) throws Exception {
         try {
             // 构建WebSocket请求头（参考Python的WEBSOCKET_HEADERS配置）
             Map<String, String> headers = new HashMap<>();
@@ -262,17 +285,11 @@ public class WebSocketServiceImpl implements WebSocketService {
             headers.put("Connection", "Upgrade");
             headers.put("Upgrade", "websocket");
 
-            // 创建WebSocket客户端（参考Python的_create_websocket_connection）
             URI serverUri = new URI(WEBSOCKET_URL);
             XianyuWebSocketClient client = new XianyuWebSocketClient(serverUri, headers, String.valueOf(accountId), displayNameUtils);
-            
-            // 设置当前用户ID（从Cookie的unb字段获取）
             client.setMyUserId(unb);
-            
-            // 设置消息处理器
             client.setMessageHandler(messageHandler);
             
-            // 设置注册成功回调（保存Token）
             final String finalAccessToken = accessToken;
             client.setOnRegistrationSuccess(() -> {
                 log.info("【账号{}】注册成功回调被触发，开始保存Token到数据库", accountId);
@@ -280,74 +297,86 @@ public class WebSocketServiceImpl implements WebSocketService {
                 log.info("【账号{}】✅ Token已成功保存到数据库", accountId);
             });
             
-            // 设置Token失效回调（自动重连）
-            // 参考Python: Token失效时设置connection_restart_flag=True，关闭WebSocket触发重连
-            client.setOnTokenExpired(() -> {
-                log.warn("【账号{}】Token失效(401)，触发自动重连流程...", accountId);
+            // 运行期收到401时异步重连（投递到reconnectExecutor，避免在client自身messageExecutor线程内自锁关闭）
+            client.setOnTokenExpired(() -> reconnectExecutor.execute(() -> {
+                log.warn("【账号{}】运行期Token失效(401)，触发异步重连流程...", accountId);
                 try {
-                    // 参考Python: 设置连接重启标志
                     connectionRestartFlags.put(accountId, true);
-                    
-                    // 停止当前连接
                     stopWebSocket(accountId);
-                    
-                    // 清除旧Token
                     tokenService.clearToken(accountId);
-                    
-                    // 重新启动连接（会自动刷新Token）
-                    log.info("【账号{}】重新启动WebSocket连接（自动刷新Token）", accountId);
                     boolean success = startWebSocket(accountId);
-                    
                     if (success) {
                         log.info("【账号{}】✅ Token失效后自动重连成功", accountId);
                     } else {
-                        log.error("【账号{}】❌ Token失效后自动重连失败，将通过重连机制继续尝试", accountId);
-                        // 参考Python: 失败后重连机制会继续尝试
+                        log.error("【账号{}】❌ Token失效后自动重连失败，交由退避重连机制继续尝试", accountId);
+                        scheduleReconnect(accountId, config.getReconnectDelay(), false);
                     }
                 } catch (Exception e) {
                     log.error("【账号{}】Token失效自动重连异常", accountId, e);
-                    // 参考Python: 异常后外层while True会继续重试
                     scheduleReconnect(accountId, config.getReconnectDelay(), false);
                 }
-            });
+            }));
             
-            // 设置心跳响应回调（更新心跳响应时间）
-            client.setOnHeartbeatResponse(() -> {
-                updateHeartbeatResponseTime(accountId);
-            });
+            client.setOnHeartbeatResponse(() -> updateHeartbeatResponseTime(accountId));
             
-            // 设置连接关闭回调（参考Python的finally块中重连逻辑）
             client.setOnConnectionClosed(() -> {
                 log.warn("【账号{}】WebSocket连接被关闭，触发自动重连...", accountId);
-
                 Boolean restartFlag = connectionRestartFlags.get(accountId);
                 boolean isManualRestart = restartFlag != null && restartFlag;
-                
-                int delay = isManualRestart ? 0 : config.getReconnectDelay();
+                int delay = isManualRestart ? 1 : config.getReconnectDelay();
                 scheduleReconnect(accountId, delay, isManualRestart);
             });
 
-            // 连接WebSocket（参考Python的connect方法）
             log.info("正在连接WebSocket: {}", WEBSOCKET_URL);
-            log.info("请求头: {}", headers);
-            
-            boolean connected = client.connectBlocking(10, TimeUnit.SECONDS);
+            boolean connected;
+            try {
+                connected = client.connectBlocking(10, TimeUnit.SECONDS);
+            } catch (Exception connectEx) {
+                client.shutdownResources();
+                throw connectEx;
+            }
             
             if (connected) {
+                // 1. 发送 /reg 注册消息并等待确认（彻底杜绝握手101成功但/reg返回401或超时的“假连接”状态）
+                log.info("开始WebSocket注册校验流程: accountId={}", accountId);
+                initializer.sendRegistrationMessage(client, accessToken, deviceId, String.valueOf(accountId));
+                int regCode = client.awaitRegistration(8000);
+
+                if (regCode == 401) {
+                    log.warn("【账号{}】WebSocket握手成功但 /reg 返回401(Token无效)，关闭本次连接", accountId);
+                    client.setIntentionalClose(true);
+                    client.close();
+                    client.shutdownResources();
+                    return 401;
+                }
+                if (regCode != 200 || !client.isConnected()) {
+                    log.error("【账号{}】WebSocket /reg 注册未通过(regCode={})或连接已断开，关闭本次连接防假在线", accountId, regCode);
+                    client.setIntentionalClose(true);
+                    client.close();
+                    client.shutdownResources();
+                    return -1;
+                }
+
                 webSocketClients.put(accountId, client);
+
+                // 2. 发送同步状态消息
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                initializer.sendSyncStatusMessage(client, String.valueOf(accountId));
                 
-                // 执行WebSocket初始化流程（参考Python的init方法）
-                log.info("开始WebSocket初始化流程: accountId={}", accountId);
-                initializer.initialize(client, accessToken, deviceId, String.valueOf(accountId));
-                
-                // 启动心跳任务
+                // 3. 启动心跳与静默续期任务
                 startHeartbeat(accountId, client);
+
+                AtomicInteger attemptCount = reconnectAttemptCounts.get(accountId);
+                if (attemptCount != null) {
+                    attemptCount.set(0);
+                }
                 
-                log.info("WebSocket连接成功: accountId={}", accountId);
-                log.info("连接状态: isOpen={}, isClosed={}", 
-                        client.isOpen(), client.isClosed());
+                log.info("WebSocket连接并注册成功: accountId={}, regCode={}", accountId, regCode);
                 
-                // 记录操作日志
                 operationLogService.log(accountId, 
                     OperationConstants.Type.CONNECT, 
                     OperationConstants.Module.WEBSOCKET,
@@ -357,13 +386,10 @@ public class WebSocketServiceImpl implements WebSocketService {
                     String.valueOf(accountId),
                     null, null, null, null);
                 
-                return true;
+                return 200;
             } else {
+                client.shutdownResources();
                 log.error("WebSocket连接失败: accountId={}", accountId);
-                log.error("连接状态: isOpen={}, isClosed={}", 
-                        client.isOpen(), client.isClosed());
-                
-                // 记录操作日志
                 operationLogService.log(accountId, 
                     OperationConstants.Type.CONNECT, 
                     OperationConstants.Module.WEBSOCKET,
@@ -373,12 +399,10 @@ public class WebSocketServiceImpl implements WebSocketService {
                     String.valueOf(accountId),
                     null, null, null, null);
                 
-                return false;
+                return -1;
             }
         } catch (Exception e) {
             log.error("连接WebSocket异常: accountId={}", accountId, e);
-            
-            // 记录操作日志
             operationLogService.log(accountId, 
                 OperationConstants.Type.CONNECT, 
                 OperationConstants.Module.WEBSOCKET,
@@ -387,13 +411,18 @@ public class WebSocketServiceImpl implements WebSocketService {
                 OperationConstants.TargetType.WEBSOCKET, 
                 String.valueOf(accountId),
                 null, null, null, null);
-            
             throw e;
         }
     }
 
     @Override
     public boolean stopWebSocket(Long accountId) {
+        synchronized (getConnectionLock(accountId)) {
+            return stopWebSocketInternal(accountId);
+        }
+    }
+
+    private boolean stopWebSocketInternal(Long accountId) {
         try {
             log.info("停止WebSocket连接: accountId={}", accountId);
 
@@ -533,129 +562,119 @@ public class WebSocketServiceImpl implements WebSocketService {
      * - 记录Token获取时间（而非刷新时间），确保1小时后刷新
      * - Token有效期20小时，但每1小时主动刷新一次，保持连接活跃
      */
+    private long computeNextTokenRefreshIntervalSeconds() {
+        int baseSeconds = Math.max(1800, config.getTokenRefreshInterval());
+        // 默认配置(43200s=12h)下，采用10~14小时随机间隔（对齐README防风控策略）
+        int minSeconds = (int) (baseSeconds * 0.83);
+        int maxSeconds = (int) (baseSeconds * 1.17);
+        return ThreadLocalRandom.current().nextLong(minSeconds, maxSeconds + 1L);
+    }
+
     private void startTokenRefresh(Long accountId) {
-        // 初始化Token刷新时间为当前时间（秒级时间戳）
         long currentTime = System.currentTimeMillis() / 1000;
+        long refreshInterval = computeNextTokenRefreshIntervalSeconds();
         lastTokenRefreshTimes.put(accountId, currentTime);
+        nextTokenRefreshDeadlines.put(accountId, currentTime + refreshInterval);
         
-        log.info("【账号{}】Token刷新任务已启动: 刷新间隔{}秒({}小时), 首次刷新将在{}小时后", 
-                accountId, config.getTokenRefreshInterval(), 
-                config.getTokenRefreshInterval() / 3600,
-                config.getTokenRefreshInterval() / 3600);
+        log.info("【账号{}】Token静默无损续期任务已启动: 下次刷新将在约{}分钟({}小时)后执行", 
+                accountId, refreshInterval / 60, String.format("%.1f", refreshInterval / 3600.0));
         
-        // Token刷新任务（每分钟检查一次，参考Python）
         ScheduledFuture<?> tokenRefreshTask = tokenRefreshScheduler.scheduleAtFixedRate(
             () -> {
                 try {
-                    Long lastRefreshTime = lastTokenRefreshTimes.get(accountId);
-                    if (lastRefreshTime == null) {
+                    Long deadline = nextTokenRefreshDeadlines.get(accountId);
+                    if (deadline == null) {
                         return;
                     }
                     
                     long now = System.currentTimeMillis() / 1000;
-                    long elapsedSeconds = now - lastRefreshTime;
-                    
-                    // 参考Python: 检查是否需要刷新Token（每1小时刷新一次）
-                    if (elapsedSeconds >= config.getTokenRefreshInterval()) {
-                        long elapsedHours = elapsedSeconds / 3600;
-                        log.info("【账号{}】Token已使用{}小时（刷新间隔{}小时），准备刷新并重连...", 
-                                accountId, elapsedHours, config.getTokenRefreshInterval() / 3600);
-                        
-                        // 参考Python: 设置连接重启标志
-                        connectionRestartFlags.put(accountId, true);
-                        
-                        // 参考Python: 刷新Token并重连（成功后关闭旧连接）
-                        refreshTokenAndReconnect(accountId);
-                    } else {
-                        // 每10分钟打印一次剩余时间（避免日志过多）
-                        if (elapsedSeconds % 600 == 0) {
-                            long remainingSeconds = config.getTokenRefreshInterval() - elapsedSeconds;
-                            log.debug("【账号{}】Token刷新倒计时: 还有{}分钟", accountId, remainingSeconds / 60);
-                        }
+                    if (now >= deadline) {
+                        log.info("【账号{}】已到达Token静默续期窗口，准备先获取新Token再平滑切换连接...", accountId);
+                        // 推迟下次检查窗口，由 silentRefreshTokenAndReconnect 接管成功更新或失败重试
+                        nextTokenRefreshDeadlines.put(accountId, now + computeNextTokenRefreshIntervalSeconds());
+                        silentRefreshTokenAndReconnect(accountId);
                     }
                 } catch (Exception e) {
                     log.error("【账号{}】Token刷新检查失败", accountId, e);
                 }
             },
-            60, 60, TimeUnit.SECONDS  // 参考Python: 每分钟检查一次
+            60, 60, TimeUnit.SECONDS
         );
         
         tokenRefreshTasks.put(accountId, tokenRefreshTask);
     }
     
     /**
-     * 刷新Token并重连
-     * 参考Python的refresh_token和重连逻辑
-     * 
-     * Python逻辑：
-     * 1. 刷新Token
-     * 2. 设置connection_restart_flag = True
-     * 3. 关闭当前WebSocket连接（触发重连）
-     * 4. Token刷新失败时，在token_retry_interval后重试
+     * 静默刷新Token并平滑重连（对齐Python原版XianyuAutoAsync核心顺序）：
+     * 1. 【关键】不断开当前正常工作的WebSocket连接，先在后台静默请求新的accessToken
+     * 2. 只有拿到新Token成功后，才加锁关闭旧连接并用新Token无缝重建连接
+     * 3. 若静默获取新Token失败（如临时风控/网络波动），保留当前正常连接继续收发消息，稍后重试
      */
-    private void refreshTokenAndReconnect(Long accountId) {
+    private void silentRefreshTokenAndReconnect(Long accountId) {
         try {
-            log.info("【账号{}】开始刷新Token并重连...", accountId);
+            if (!isConnected(accountId)) {
+                log.debug("【账号{}】当前WebSocket未连接，跳过静默续期", accountId);
+                return;
+            }
+            log.info("【账号{}】开始静默刷新Token（当前连接保持不断）...", accountId);
             
-            // 参考Python: 刷新Token前先从数据库重新加载最新Cookie
-            // 避免使用过期的Cookie导致刷新必然失败
             try {
                 if (cookieRefreshService != null) {
-                    log.info("【账号{}】刷新Token前先检查Cookie登录状态...", accountId);
-                    // 使用静默检查，不记录操作日志（避免频繁记录）
                     boolean cookieOk = cookieRefreshService.checkLoginStatusQuietly(accountId);
                     if (!cookieOk) {
-                        log.warn("【账号{}】Cookie已失效(hasLogin)，触发浏览器兜底刷新Cookie（对齐Python的_refresh_cookies_via_browser）...", accountId);
-                        boolean browserRefreshOk = cookieRefreshService.refreshCookie(accountId);
-                        if (browserRefreshOk) {
-                            log.info("【账号{}】浏览器兜底刷新Cookie成功，继续重连", accountId);
-                        } else {
-                            log.error("【账号{}】hasLogin和浏览器兜底刷新Cookie均失败，Cookie可能已彻底过期", accountId);
-                        }
+                        log.warn("【账号{}】静默续期前检测到hasLogin未通过，尝试浏览器兜底刷新Cookie...", accountId);
+                        cookieRefreshService.refreshCookie(accountId);
                     }
                 }
             } catch (Exception e) {
-                log.warn("【账号{}】刷新Token前Cookie检查/兜底刷新异常，继续尝试重连: {}", accountId, e.getMessage());
+                log.warn("【账号{}】静默续期前Cookie检查异常: {}", accountId, e.getMessage());
             }
-            
-            // 停止当前连接
-            stopWebSocket(accountId);
-            
-            // 清除旧Token
-            tokenService.clearToken(accountId);
-            
-            // 重新启动连接（会自动获取新Token）
-            boolean success = startWebSocket(accountId);
-            
-            if (success) {
-                // 更新Token刷新时间
-                lastTokenRefreshTimes.put(accountId, System.currentTimeMillis() / 1000);
-                // 重置重连计数
-                AtomicInteger attemptCount = reconnectAttemptCounts.get(accountId);
-                if (attemptCount != null) {
-                    attemptCount.set(0);
+
+            // 不断开旧连接，先静默获取新Token
+            String newToken = tokenService.fetchNewAccessTokenQuietly(accountId);
+            if (newToken != null && !newToken.isEmpty()) {
+                log.info("【账号{}】✅ 新Token已就绪，开始平滑切换WebSocket连接...", accountId);
+                boolean switched = startWebSocketWithToken(accountId, newToken);
+                if (switched) {
+                    long now = System.currentTimeMillis() / 1000;
+                    lastTokenRefreshTimes.put(accountId, now);
+                    nextTokenRefreshDeadlines.put(accountId, now + computeNextTokenRefreshIntervalSeconds());
+                    ScheduledFuture<?> oldRetry = tokenRefreshRetryTasks.remove(accountId);
+                    if (oldRetry != null) {
+                        oldRetry.cancel(false);
+                    }
+                    log.info("【账号{}】✅ Token静默续期并平滑重连成功", accountId);
+                    return;
+                } else {
+                    log.warn("【账号{}】新Token切换连接失败，交由退避重连恢复", accountId);
+                    scheduleReconnect(accountId, config.getReconnectDelay(), false);
+                    return;
                 }
-                log.info("【账号{}】✅ Token刷新并重连成功", accountId);
-            } else {
-                log.error("【账号{}】❌ Token刷新并重连失败，将在{}秒后重试", 
-                        accountId, config.getTokenRetryInterval());
-                
-                // 参考Python: Token刷新失败后，在token_retry_interval后重试
-                reconnectExecutor.schedule(() -> {
-                    log.info("【账号{}】Token刷新重试间隔已到，开始重试...", accountId);
-                    refreshTokenAndReconnect(accountId);
-                }, config.getTokenRetryInterval(), TimeUnit.SECONDS);
             }
+
+            log.warn("【账号{}】⚠️ 静默获取新Token未成功，保留当前正常工作的WebSocket不断开，将在{}秒后重试",
+                    accountId, config.getTokenRetryInterval());
+            scheduleSilentTokenRetry(accountId);
         } catch (Exception e) {
-            log.error("【账号{}】Token刷新并重连异常，将在{}秒后重试", 
+            log.error("【账号{}】Token静默续期异常，保留当前连接，将在{}秒后重试",
                     accountId, config.getTokenRetryInterval(), e);
-            
-            // 参考Python: 异常后也要重试
-            reconnectExecutor.schedule(() -> {
-                log.info("【账号{}】Token刷新重试间隔已到，开始重试...", accountId);
-                refreshTokenAndReconnect(accountId);
-            }, config.getTokenRetryInterval(), TimeUnit.SECONDS);
+            scheduleSilentTokenRetry(accountId);
         }
+    }
+
+    private void scheduleSilentTokenRetry(Long accountId) {
+        ScheduledFuture<?> prev = tokenRefreshRetryTasks.remove(accountId);
+        if (prev != null && !prev.isDone()) {
+            prev.cancel(false);
+        }
+        ScheduledFuture<?> retryFuture = reconnectExecutor.schedule(() -> {
+            tokenRefreshRetryTasks.remove(accountId);
+            if (isConnected(accountId)) {
+                log.info("【账号{}】执行Token静默续期重试...", accountId);
+                silentRefreshTokenAndReconnect(accountId);
+            }
+        }, config.getTokenRetryInterval(), TimeUnit.SECONDS);
+        tokenRefreshRetryTasks.put(accountId, retryFuture);
     }
     
     /**
@@ -801,6 +820,13 @@ public class WebSocketServiceImpl implements WebSocketService {
             tokenRefreshTask.cancel(false);
             log.info("Token刷新任务已停止: accountId={}", accountId);
         }
+
+        // 停止Token静默刷新重试任务
+        ScheduledFuture<?> tokenRetryTask = tokenRefreshRetryTasks.remove(accountId);
+        if (tokenRetryTask != null) {
+            tokenRetryTask.cancel(false);
+        }
+        nextTokenRefreshDeadlines.remove(accountId);
         
         // 取消重连任务
         Future<?> reconnectTask = reconnectTasks.remove(accountId);

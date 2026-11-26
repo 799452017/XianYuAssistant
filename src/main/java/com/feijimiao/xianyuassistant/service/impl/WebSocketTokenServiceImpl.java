@@ -139,7 +139,7 @@ public class WebSocketTokenServiceImpl implements WebSocketTokenService {
     @Override
     public String getAccessToken(Long accountId) {
         synchronized (getTokenLock(accountId)) {
-            return getAccessTokenWithRetry(accountId, 0);
+            return getAccessTokenWithRetry(accountId, 0, false);
         }
     }
 
@@ -177,6 +177,10 @@ public class WebSocketTokenServiceImpl implements WebSocketTokenService {
      * @return accessToken
      */
     private String getAccessTokenWithRetry(Long accountId, int retryCount) {
+        return getAccessTokenWithRetry(accountId, retryCount, false);
+    }
+
+    private String getAccessTokenWithRetry(Long accountId, int retryCount, boolean forceRefresh) {
         try {
             // 0. 检查是否正在等待验证
             if (pendingCaptchaAccounts.containsKey(accountId)) {
@@ -199,24 +203,29 @@ public class WebSocketTokenServiceImpl implements WebSocketTokenService {
                 return null;
             }
 
-            // 2. 先从数据库检查是否有有效的 Token
-            XianyuCookie cookieEntity = xianyuCookieMapper.selectOne(
-                    new LambdaQueryWrapper<XianyuCookie>()
-                            .eq(XianyuCookie::getXianyuAccountId, accountId)
-            );
+            // 2. 非强制刷新时，先从数据库检查是否有有效的 Token
+            if (!forceRefresh) {
+                XianyuCookie cookieEntity = xianyuCookieMapper.selectOne(
+                        new LambdaQueryWrapper<XianyuCookie>()
+                                .eq(XianyuCookie::getXianyuAccountId, accountId)
+                                .orderByDesc(XianyuCookie::getCreatedTime)
+                                .last("LIMIT 1")
+                );
 
-            if (cookieEntity != null && cookieEntity.getWebsocketToken() != null
-                    && cookieEntity.getTokenExpireTime() != null) {
-                long now = System.currentTimeMillis();
-                if (cookieEntity.getTokenExpireTime() > now) {
-                    long remainingHours = (cookieEntity.getTokenExpireTime() - now) / (60 * 60 * 1000);
-                    log.info("【账号{}】使用数据库中的accessToken（剩余有效期: {}小时）",
-                            accountId, remainingHours);
-                    pendingCaptchaAccounts.remove(accountId);
-                    captchaTimestamps.remove(accountId);
-                    return cookieEntity.getWebsocketToken();
-                } else {
-                    log.info("【账号{}】数据库中的Token已过期，需要重新获取", accountId);
+                if (cookieEntity != null && cookieEntity.getWebsocketToken() != null
+                        && !cookieEntity.getWebsocketToken().isEmpty()
+                        && cookieEntity.getTokenExpireTime() != null) {
+                    long now = System.currentTimeMillis();
+                    if (cookieEntity.getTokenExpireTime() > now) {
+                        long remainingHours = (cookieEntity.getTokenExpireTime() - now) / (60 * 60 * 1000);
+                        log.info("【账号{}】使用数据库中的accessToken（剩余有效期: {}小时）",
+                                accountId, remainingHours);
+                        pendingCaptchaAccounts.remove(accountId);
+                        captchaTimestamps.remove(accountId);
+                        return cookieEntity.getWebsocketToken();
+                    } else {
+                        log.info("【账号{}】数据库中的Token已过期，需要重新获取", accountId);
+                    }
                 }
             }
 
@@ -316,7 +325,10 @@ public class WebSocketTokenServiceImpl implements WebSocketTokenService {
                     log.info("【账号{}】响应中无Set-Cookie", accountId);
                 }
 
-                log.info("【账号{}】3、响应内容: {}", accountId, responseBody);
+                String maskedBody = responseBody != null
+                        ? responseBody.replaceAll("(\"accessToken\"\\s*:\\s*\")([^\"]{0,8})[^\"]*(\")", "$1$2***$3")
+                        : "";
+                log.info("【账号{}】3、响应内容: {}", accountId, maskedBody);
                 log.info("【账号{}】============", accountId);
 
                 if (responseBody == null || responseBody.isEmpty()) {
@@ -754,6 +766,7 @@ public class WebSocketTokenServiceImpl implements WebSocketTokenService {
             xianyuCookieMapper.update(null,
                     new LambdaUpdateWrapper<XianyuCookie>()
                             .eq(XianyuCookie::getXianyuAccountId, accountId)
+                            .set(XianyuCookie::getWebsocketToken, null)
                             .set(XianyuCookie::getTokenExpireTime, 0L)
             );
 
@@ -784,7 +797,7 @@ public class WebSocketTokenServiceImpl implements WebSocketTokenService {
                 clearToken(accountId);
 
                 // 2. 获取新token
-                String newToken = getAccessTokenWithRetry(accountId, 0);
+                String newToken = getAccessTokenWithRetry(accountId, 0, true);
 
                 if (newToken != null && !newToken.isEmpty()) {
                     log.info("【账号{}】✅ WebSocket token刷新成功", accountId);
@@ -800,6 +813,25 @@ public class WebSocketTokenServiceImpl implements WebSocketTokenService {
                 throw e;
             } catch (Exception e) {
                 log.error("【账号{}】刷新WebSocket token异常", accountId, e);
+                return null;
+            }
+        }
+    }
+
+    @Override
+    public String fetchNewAccessTokenQuietly(Long accountId) {
+        synchronized (getTokenLock(accountId)) {
+            try {
+                log.info("【账号{}】开始静默获取新的WebSocket token（保留旧Token兜底）...", accountId);
+                String newToken = getAccessTokenWithRetry(accountId, 0, true);
+                if (newToken != null && !newToken.isEmpty()) {
+                    log.info("【账号{}】✅ 静默获取新WebSocket token成功", accountId);
+                    return newToken;
+                }
+                log.warn("【账号{}】⚠️ 静默获取新WebSocket token未返回结果，继续沿用现有连接", accountId);
+                return null;
+            } catch (Exception e) {
+                log.warn("【账号{}】静默获取新WebSocket token未成功({}): 继续保持当前连接活跃", accountId, e.getMessage());
                 return null;
             }
         }

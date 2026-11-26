@@ -43,4 +43,13 @@ public interface WebSocketTokenService {
      * @return 新的token，失败返回null
      */
     String refreshToken(Long accountId);
+
+    /**
+     * 静默获取新的WebSocket token（不预先清除数据库中尚在有效期内的旧Token）
+     * 仅当新Token获取成功时才覆盖数据库，避免预刷新失败破坏现有可用凭证
+     *
+     * @param accountId 账号ID
+     * @return 新的token，失败返回null
+     */
+    String fetchNewAccessTokenQuietly(Long accountId);
 }

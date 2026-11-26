@@ -21,15 +21,15 @@ public class WebSocketConfig {
     
     /**
      * 心跳超时（秒）
-     * 参考Python: HEARTBEAT_TIMEOUT = 5
+     * 放宽至20秒（总容忍窗口 15+20=35 秒），避免偶发网络抖动误判掉线
      */
-    private int heartbeatTimeout = 5;
+    private int heartbeatTimeout = 20;
     
     /**
      * Token刷新间隔（秒）
-     * 参考Python: TOKEN_REFRESH_INTERVAL = 3600 (1小时)
+     * 对齐README策略：默认12小时基准（实际运行采用10-14小时随机抖动静默续期）
      */
-    private int tokenRefreshInterval = 3600;
+    private int tokenRefreshInterval = 43200;
     
     /**
      * Token重试间隔（秒）
