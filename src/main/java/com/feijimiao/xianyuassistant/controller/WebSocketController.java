@@ -477,30 +477,82 @@ public class WebSocketController {
                 return ResultObject.failed("账号不存在");
             }
             
+            // 清理重复Cookie字段
+            String cleanedCookie = cookieRefreshService.clearDuplicateCookies(reqDTO.getCookieText().trim());
+
             // 从Cookie中提取UNB
-            String unb = extractUnbFromCookie(reqDTO.getCookieText());
+            String unb = extractUnbFromCookie(cleanedCookie);
             if (unb == null || unb.isEmpty()) {
                 return ResultObject.failed("无法从Cookie中提取UNB信息，请确保Cookie包含unb字段");
             }
             
-            // 更新Cookie
+            // 先停止旧WebSocket连接，防止写库与刷新令牌期间旧连接后台重连抢锁
+            try {
+                webSocketService.stopWebSocket(reqDTO.getXianyuAccountId());
+            } catch (Exception stopEx) {
+                log.debug("【账号{}】更新Cookie前停止旧连接忽略异常: {}", reqDTO.getXianyuAccountId(), stopEx.getMessage());
+            }
+
+            // 更新Cookie（内部校验UNB归属并清空旧websocketToken）
             com.feijimiao.xianyuassistant.service.AccountService accountService = 
                     applicationContext.getBean(com.feijimiao.xianyuassistant.service.AccountService.class);
-            accountService.updateAccountCookie(reqDTO.getXianyuAccountId(), unb, reqDTO.getCookieText());
+            boolean updated = accountService.updateAccountCookie(reqDTO.getXianyuAccountId(), unb, cleanedCookie);
+            if (!updated) {
+                return ResultObject.failed("更新Cookie失败");
+            }
+
+            // 关键修复：清除5分钟滑块等待锁与旧Token缓存，避免新Cookie被旧锁拦截或复用死Token
+            com.feijimiao.xianyuassistant.service.WebSocketTokenService tokenService =
+                    applicationContext.getBean(com.feijimiao.xianyuassistant.service.WebSocketTokenService.class);
+            tokenService.clearCaptchaWait(reqDTO.getXianyuAccountId());
+            tokenService.clearToken(reqDTO.getXianyuAccountId());
+
+            // 若新Cookie缺少_m_h5_tk，主动补齐一次登录态绑定的_m_h5_tk
+            if (!cleanedCookie.contains("_m_h5_tk=")) {
+                try {
+                    tokenRefreshService.refreshMh5tkToken(reqDTO.getXianyuAccountId());
+                } catch (Exception e) {
+                    log.warn("【账号{}】更新Cookie后补齐_m_h5_tk异常: {}", reqDTO.getXianyuAccountId(), e.getMessage());
+                }
+            }
             
             // 记录操作日志
             operationLogService.log(reqDTO.getXianyuAccountId(),
                     com.feijimiao.xianyuassistant.constants.OperationConstants.Type.UPDATE,
                     com.feijimiao.xianyuassistant.constants.OperationConstants.Module.COOKIE,
-                    "Cookie手动更新成功",
+                    "Cookie更新成功，准备重建WebSocket连接",
                     com.feijimiao.xianyuassistant.constants.OperationConstants.Status.SUCCESS,
                     com.feijimiao.xianyuassistant.constants.OperationConstants.TargetType.COOKIE,
                     String.valueOf(reqDTO.getXianyuAccountId()),
                     null, null, null, null);
             
             UpdateCookieRespDTO respDTO = new UpdateCookieRespDTO();
-            respDTO.setMessage("Cookie更新成功");
-            return ResultObject.success(respDTO);
+            // 使用新Cookie启动并校验WebSocket连接
+            try {
+                boolean wsStarted = webSocketService.startWebSocket(reqDTO.getXianyuAccountId());
+                respDTO.setWsConnected(wsStarted);
+                respDTO.setNeedCaptcha(false);
+                if (wsStarted) {
+                    respDTO.setMessage("Cookie更新成功，WebSocket连接已自动启动");
+                } else {
+                    respDTO.setMessage("Cookie已更新，但WebSocket连接未成功：" + getDetailedErrorMessage(reqDTO.getXianyuAccountId()));
+                }
+            } catch (com.feijimiao.xianyuassistant.exception.CaptchaRequiredException ce) {
+                log.warn("【账号{}】Cookie更新后启动WebSocket触发滑块验证: {}", reqDTO.getXianyuAccountId(), ce.getCaptchaUrl());
+                respDTO.setWsConnected(false);
+                respDTO.setNeedCaptcha(true);
+                respDTO.setCaptchaUrl(ce.getCaptchaUrl());
+                respDTO.setMessage("Cookie已更新，但闲鱼消息接口要求完成滑块验证，请前往闲鱼IM网页过滑块后再更新Cookie");
+            } catch (Exception wsEx) {
+                log.warn("【账号{}】Cookie更新后自动重连异常: {}", reqDTO.getXianyuAccountId(), wsEx.getMessage());
+                respDTO.setWsConnected(false);
+                respDTO.setNeedCaptcha(false);
+                respDTO.setMessage("Cookie已更新，但自动连接失败：" + wsEx.getMessage());
+            }
+            return ResultObject.success(respDTO, respDTO.getMessage());
+        } catch (IllegalArgumentException e) {
+            log.warn("更新Cookie校验未通过: accountId={}, reason={}", reqDTO.getXianyuAccountId(), e.getMessage());
+            return ResultObject.failed(e.getMessage());
         } catch (Exception e) {
             log.error("更新Cookie失败", e);
             
@@ -629,7 +681,8 @@ public class WebSocketController {
             com.feijimiao.xianyuassistant.service.WebSocketTokenService tokenService = 
                     applicationContext.getBean(com.feijimiao.xianyuassistant.service.WebSocketTokenService.class);
             
-            // 保存Token
+            // 清除滑块等待锁并保存Token
+            tokenService.clearCaptchaWait(reqDTO.getXianyuAccountId());
             tokenService.saveToken(reqDTO.getXianyuAccountId(), reqDTO.getWebsocketToken().trim());
             
             log.info("【账号{}】✅ WebSocket Token手动更新成功", reqDTO.getXianyuAccountId());

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch } from 'vue'
 import { generateQRCode, getQRCodeStatus, getQRCodeCookies } from '@/api/qrlogin'
 import { addAccount } from '@/api/account'
 import { showSuccess, showError } from '@/utils'
@@ -26,38 +26,52 @@ const qrCodeUrl = ref('')
 const sessionId = ref('')
 const status = ref<QRLoginSession['status']>('pending')
 const statusText = ref('正在生成二维码...')
+const verificationUrl = ref('')
 let pollTimer: number | null = null
+let handlingSuccess = false
 
 watch(() => props.modelValue, (newVal) => {
   if (newVal) {
+    handlingSuccess = false
+    verificationUrl.value = ''
     checkScreenSize()
     window.addEventListener('resize', checkScreenSize)
     generateQR()
   } else {
     window.removeEventListener('resize', checkScreenSize)
     stopPolling()
+    handlingSuccess = false
   }
 })
 
 const generateQR = async () => {
+  stopPolling()
+  handlingSuccess = false
+  verificationUrl.value = ''
+  qrCodeUrl.value = ''
+  status.value = 'pending'
+  statusText.value = '正在生成二维码...'
   try {
     const response = await generateQRCode()
     if (response.code === 0 || response.code === 200) {
       qrCodeUrl.value = response.data?.qrCodeUrl || ''
       sessionId.value = response.data?.sessionId || ''
+      statusText.value = '等待扫码...'
       startPolling()
     } else {
       throw new Error(response.msg || '生成二维码失败')
     }
   } catch (error: any) {
     console.error('生成二维码失败:', error)
+    statusText.value = '生成二维码失败，请重试'
   }
 }
 
 const startPolling = () => {
   if (!sessionId.value) return
+  stopPolling()
   pollTimer = window.setInterval(async () => {
-    if (!sessionId.value) return
+    if (!sessionId.value || handlingSuccess) return
     try {
       const response = await getQRCodeStatus(sessionId.value)
       if (response.code === 0 || response.code === 200) {
@@ -69,15 +83,32 @@ const startPolling = () => {
             statusText.value = '等待扫码...'
             break
           case 'scanned':
-            statusText.value = '已扫码，等待确认...'
+            statusText.value = '已扫码，请在手机端确认...'
             break
           case 'confirmed':
-            statusText.value = '登录成功！正在获取信息...'
+            stopPolling()
+            if (handlingSuccess) return
+            handlingSuccess = true
+            statusText.value = '登录成功！正在保存账号信息...'
             await handleLoginSuccess()
             break
+          case 'verification_required':
+            stopPolling()
+            verificationUrl.value = data?.verificationUrl || ''
+            statusText.value = '触发闲鱼安全验证，请点击下方按钮完成验证后重试，或手动添加Cookie'
+            break
+          case 'cancelled':
+            stopPolling()
+            statusText.value = '已取消扫码登录'
+            break
           case 'expired':
+          case 'not_found':
             statusText.value = '二维码已过期'
             stopPolling()
+            break
+          case 'error':
+            stopPolling()
+            statusText.value = data?.message || '提取登录凭证失败，请重试'
             break
         }
       }
@@ -140,6 +171,12 @@ const handleLoginSuccess = async () => {
   }
 }
 
+const openVerification = () => {
+  if (verificationUrl.value) {
+    window.open(verificationUrl.value, '_blank')
+  }
+}
+
 const handleClose = () => {
   stopPolling()
   emit('update:modelValue', false)
@@ -183,7 +220,23 @@ const handleClose = () => {
       </div>
 
       <!-- 弹窗底部按钮 -->
-      <div class="ios-sheet-footer">
+      <div class="ios-sheet-footer" style="display: flex; gap: 10px;">
+        <button
+          v-if="verificationUrl"
+          class="ios-sheet-btn"
+          style="background: #0A84FF; color: #fff;"
+          @click="openVerification"
+        >
+          前往安全验证
+        </button>
+        <button
+          v-if="status === 'expired' || status === 'cancelled' || status === 'error' || status === 'not_found' || status === 'verification_required'"
+          class="ios-sheet-btn"
+          style="background: rgba(10, 132, 255, 0.12); color: #0A84FF;"
+          @click="generateQR"
+        >
+          重新获取二维码
+        </button>
         <button class="ios-sheet-btn ios-sheet-btn--cancel" @click="handleClose">
           取消
         </button>

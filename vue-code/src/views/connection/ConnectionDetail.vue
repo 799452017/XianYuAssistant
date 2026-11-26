@@ -159,11 +159,11 @@ const handleRefresh = async () => {
 }
 
 const handleManualUpdateCookieSuccess = async () => {
-  await loadConnectionStatus()
+  await Promise.all([loadConnectionStatus(), loadOperationLogs()])
 }
 
 const handleQRUpdateSuccess = async () => {
-  await loadConnectionStatus()
+  await Promise.all([loadConnectionStatus(), loadOperationLogs()])
 }
 
 const handleCaptchaConfirm = () => {
@@ -453,11 +453,13 @@ onBeforeUnmount(() => {
       :account-id="accountId || 0"
       :current-cookie="connectionStatus.cookieText || ''"
       @success="handleManualUpdateCookieSuccess"
+      @need-captcha="showCaptchaGuideDialog = true"
     />
     <QRUpdateDialog
       v-model="showQRUpdateDialog"
       :account-id="accountId || 0"
       @success="handleQRUpdateSuccess"
+      @need-captcha="showCaptchaGuideDialog = true"
     />
     <CaptchaGuideDialog
       v-model="showCaptchaGuideDialog"

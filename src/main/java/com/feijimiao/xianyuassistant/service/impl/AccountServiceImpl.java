@@ -109,6 +109,9 @@ public class AccountServiceImpl implements AccountService {
     @Transactional(rollbackFor = Exception.class)
     public Long saveAccountAndCookie(String accountNote, String unb, String cookieText, String mH5Tk) {
         try {
+            if ((mH5Tk == null || mH5Tk.isEmpty()) && cookieText != null) {
+                mH5Tk = extractMH5TkFromCookie(cookieText);
+            }
             log.info("开始保存账号和Cookie: accountNote={}, unb={}, 包含m_h5_tk={}", 
                     accountNote, unb, mH5Tk != null);
 
@@ -119,9 +122,14 @@ public class AccountServiceImpl implements AccountService {
 
             Long accountId;
             if (existingAccount != null) {
-                // 账号已存在，更新信息
+                // 账号已存在，更新信息（若原账号已有自定义备注且新传入的是自动生成的"账号_xxx"，保留原备注）
                 accountId = existingAccount.getId();
-                existingAccount.setAccountNote(accountNote);
+                String existingNote = existingAccount.getAccountNote();
+                boolean keepExistingNote = existingNote != null && !existingNote.isBlank()
+                        && (accountNote == null || accountNote.isBlank() || accountNote.startsWith("账号_"));
+                if (!keepExistingNote && accountNote != null && !accountNote.isBlank()) {
+                    existingAccount.setAccountNote(accountNote);
+                }
                 existingAccount.setStatus(1); // 正常状态
                 existingAccount.setUpdatedTime(getCurrentTimeString());
                 accountMapper.updateById(existingAccount);
@@ -145,15 +153,20 @@ public class AccountServiceImpl implements AccountService {
             XianyuCookie existingCookie = cookieMapper.selectOne(cookieQuery);
 
             if (existingCookie != null) {
-                // Cookie已存在，更新
-                existingCookie.setCookieText(cookieText);
-                existingCookie.setMH5Tk(mH5Tk);
-                existingCookie.setCookieStatus(1); // 有效状态
-                existingCookie.setExpireTime(getFutureTimeString(30)); // 30天后过期
-                existingCookie.setUpdatedTime(getCurrentTimeString());
-                cookieMapper.updateById(existingCookie);
-                log.info("更新Cookie成功: cookieId={}, m_h5_tk={}", 
-                        existingCookie.getId(), mH5Tk != null ? "已保存" : "未提供");
+                // Cookie已存在，使用UpdateWrapper显式清空旧websocketToken，防止新Cookie沿用旧死Token
+                com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<XianyuCookie> updateWrapper =
+                        new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<>();
+                updateWrapper.eq(XianyuCookie::getId, existingCookie.getId())
+                        .set(XianyuCookie::getCookieText, cookieText)
+                        .set(mH5Tk != null && !mH5Tk.isEmpty(), XianyuCookie::getMH5Tk, mH5Tk)
+                        .set(XianyuCookie::getCookieStatus, 1)
+                        .set(XianyuCookie::getWebsocketToken, null)
+                        .set(XianyuCookie::getTokenExpireTime, 0L)
+                        .set(XianyuCookie::getExpireTime, getFutureTimeString(30))
+                        .set(XianyuCookie::getUpdatedTime, getCurrentTimeString());
+                cookieMapper.update(null, updateWrapper);
+                log.info("更新Cookie并清除旧Token成功: cookieId={}, m_h5_tk={}", 
+                        existingCookie.getId(), mH5Tk != null ? "已保存" : "保留原值");
             } else {
                 // 创建新Cookie
                 XianyuCookie cookie = new XianyuCookie();
@@ -508,17 +521,29 @@ public class AccountServiceImpl implements AccountService {
         try {
             log.info("更新账号Cookie: accountId={}, unb={}", accountId, unb);
 
-            // 1. 更新账号的UNB
+            // 1. 校验账号是否存在，并防止不同闲鱼号扫码/粘贴Cookie串号
             XianyuAccount account = accountMapper.selectById(accountId);
             if (account == null) {
                 log.warn("账号不存在: accountId={}", accountId);
                 return false;
             }
-            
-            account.setUnb(unb);
+
+            if (unb != null && !unb.isEmpty()) {
+                LambdaQueryWrapper<XianyuAccount> unbQuery = new LambdaQueryWrapper<>();
+                unbQuery.eq(XianyuAccount::getUnb, unb);
+                XianyuAccount unbOwner = accountMapper.selectOne(unbQuery);
+                if (unbOwner != null && !Objects.equals(unbOwner.getId(), accountId)) {
+                    throw new IllegalArgumentException("该Cookie/扫码属于另一个已存在的闲鱼账号(UNB: " + unb + ")，请切换到对应账号更新");
+                }
+                if (account.getUnb() != null && !account.getUnb().isEmpty() && !Objects.equals(account.getUnb(), unb)) {
+                    throw new IllegalArgumentException("扫码或填入的闲鱼号(UNB: " + unb + ")与当前账号(" + account.getUnb() + ")不一致，请使用同一闲鱼号操作");
+                }
+                account.setUnb(unb);
+            }
+            account.setStatus(1); // 恢复账号为正常状态
             account.setUpdatedTime(getCurrentTimeString());
             accountMapper.updateById(account);
-            log.info("更新账号UNB成功: accountId={}, unb={}", accountId, unb);
+            log.info("更新账号状态与UNB成功: accountId={}, unb={}", accountId, unb);
 
             // 2. 提取_m_h5_tk
             String mH5Tk = extractMH5TkFromCookie(cookieText);
@@ -529,14 +554,19 @@ public class AccountServiceImpl implements AccountService {
             XianyuCookie cookie = cookieMapper.selectOne(cookieQuery);
 
             if (cookie != null) {
-                // 更新现有Cookie
-                cookie.setCookieText(cookieText);
-                cookie.setMH5Tk(mH5Tk);
-                cookie.setCookieStatus(1);
-                cookie.setExpireTime(getFutureTimeString(30));
-                cookie.setUpdatedTime(getCurrentTimeString());
-                cookieMapper.updateById(cookie);
-                log.info("更新Cookie成功: accountId={}", accountId);
+                // 使用UpdateWrapper显式置空旧websocketToken和tokenExpireTime，确保下次连接重新换取匹配新Cookie的Token
+                com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<XianyuCookie> updateWrapper =
+                        new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<>();
+                updateWrapper.eq(XianyuCookie::getId, cookie.getId())
+                        .set(XianyuCookie::getCookieText, cookieText)
+                        .set(XianyuCookie::getMH5Tk, mH5Tk)
+                        .set(XianyuCookie::getCookieStatus, 1)
+                        .set(XianyuCookie::getWebsocketToken, null)
+                        .set(XianyuCookie::getTokenExpireTime, 0L)
+                        .set(XianyuCookie::getExpireTime, getFutureTimeString(30))
+                        .set(XianyuCookie::getUpdatedTime, getCurrentTimeString());
+                cookieMapper.update(null, updateWrapper);
+                log.info("更新Cookie并清空旧Token成功: accountId={}", accountId);
             } else {
                 // 创建新Cookie
                 cookie = new XianyuCookie();
@@ -553,6 +583,8 @@ public class AccountServiceImpl implements AccountService {
 
             return true;
 
+        } catch (IllegalArgumentException e) {
+            throw e;
         } catch (Exception e) {
             log.error("更新账号Cookie失败: accountId={}, unb={}", accountId, unb, e);
             return false;

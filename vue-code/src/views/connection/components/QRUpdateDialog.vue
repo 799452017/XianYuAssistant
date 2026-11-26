@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { generateQRCode, getQRCodeStatus, getQRCodeCookies } from '@/api/qrlogin'
-import { updateCookie, updateToken, startConnection } from '@/api/websocket'
+import { updateCookie } from '@/api/websocket'
 import { showSuccess, showError } from '@/utils'
 import type { QRLoginSession } from '@/types'
 
@@ -13,6 +13,7 @@ interface Props {
 interface Emits {
   (e: 'update:modelValue', value: boolean): void
   (e: 'success'): void
+  (e: 'need-captcha'): void
 }
 
 const props = defineProps<Props>()
@@ -22,28 +23,43 @@ const qrCodeUrl = ref('')
 const sessionId = ref('')
 const status = ref<QRLoginSession['status']>('pending')
 const statusText = ref('正在生成二维码...')
+const verificationUrl = ref('')
 let pollTimer: number | null = null
+let handlingSuccess = false
 
 watch(() => props.modelValue, (newVal) => {
   if (newVal) {
+    handlingSuccess = false
+    verificationUrl.value = ''
+    status.value = 'pending'
+    statusText.value = '正在生成二维码...'
     generateQR()
   } else {
     stopPolling()
+    handlingSuccess = false
   }
 })
 
 const generateQR = async () => {
+  stopPolling()
+  handlingSuccess = false
+  verificationUrl.value = ''
+  qrCodeUrl.value = ''
+  status.value = 'pending'
+  statusText.value = '正在生成二维码...'
   try {
     const response = await generateQRCode()
     if (response.code === 0 || response.code === 200) {
       qrCodeUrl.value = response.data?.qrCodeUrl || ''
       sessionId.value = response.data?.sessionId || ''
+      statusText.value = '等待扫码...'
       startPolling()
     } else {
       throw new Error(response.msg || '生成二维码失败')
     }
   } catch (error: any) {
     console.error('生成二维码失败:', error)
+    statusText.value = '生成二维码失败，请重试'
     showError('生成二维码失败')
   }
 }
@@ -53,8 +69,9 @@ const startPolling = () => {
     showError('会话ID为空，无法查询状态')
     return
   }
+  stopPolling()
   pollTimer = window.setInterval(async () => {
-    if (!sessionId.value) return
+    if (!sessionId.value || handlingSuccess) return
     try {
       const response = await getQRCodeStatus(sessionId.value)
       if (response.code === 0 || response.code === 200) {
@@ -66,15 +83,35 @@ const startPolling = () => {
             statusText.value = '等待扫码...'
             break
           case 'scanned':
-            statusText.value = '已扫码，等待确认...'
+            statusText.value = '已扫码，请在手机端确认...'
             break
           case 'confirmed':
-            statusText.value = '登录成功！正在更新Cookie和Token...'
+            // 立即停止轮询并加防重入锁，防止2秒定时器并发重复执行更新与重连
+            stopPolling()
+            if (handlingSuccess) return
+            handlingSuccess = true
+            statusText.value = '扫码确认成功！正在更新凭证并连接...'
             await handleLoginSuccess()
             break
-          case 'expired':
-            statusText.value = '二维码已过期'
+          case 'verification_required':
             stopPolling()
+            verificationUrl.value = data?.verificationUrl || ''
+            statusText.value = '账号触发安全验证，请点击下方完成验证或改用网页版手动更新Cookie'
+            showError('扫码触发安全验证，请完成验证或使用网页版手动更新Cookie')
+            break
+          case 'cancelled':
+            stopPolling()
+            statusText.value = '已取消扫码登录，可重新生成二维码'
+            break
+          case 'expired':
+          case 'not_found':
+            stopPolling()
+            statusText.value = '二维码已过期，请点击下方重新获取'
+            break
+          case 'error':
+            stopPolling()
+            statusText.value = data?.message || '提取登录凭证失败，请重新扫码'
+            showError(statusText.value)
             break
         }
       }
@@ -91,9 +128,15 @@ const stopPolling = () => {
   }
 }
 
+const openVerificationPage = () => {
+  if (verificationUrl.value) {
+    window.open(verificationUrl.value, '_blank')
+  }
+}
+
 const handleLoginSuccess = async () => {
   try {
-    // 1. 获取Cookie
+    // 1. 获取完整Cookie
     const cookieRes = await getQRCodeCookies(sessionId.value)
     if (cookieRes.code !== 0 && cookieRes.code !== 200) {
       showError(cookieRes.msg || '获取Cookie失败')
@@ -101,17 +144,15 @@ const handleLoginSuccess = async () => {
       return
     }
 
-    // 2. 直接使用返回的Cookie字符串和UNB
     const cookieText = cookieRes.data?.cookies || ''
-    const unb = cookieRes.data?.unb || ''
-
     if (!cookieText) {
-      showError('Cookie为空，请重试')
+      showError('扫码返回的Cookie为空，请重新扫码')
       handleClose()
       return
     }
 
-    // 3. 更新Cookie
+    // 2. 更新Cookie（后端会自动清理旧Token/滑块锁并启动校验WebSocket连接）
+    statusText.value = '正在保存新Cookie并建立WebSocket长连接...'
     const cookieUpdateRes = await updateCookie({
       xianyuAccountId: props.accountId,
       cookieText: cookieText
@@ -123,25 +164,24 @@ const handleLoginSuccess = async () => {
       return
     }
 
-    // 4. 自动启动连接
-    statusText.value = 'Cookie更新成功，正在启动连接...'
-    try {
-      const startRes = await startConnection(props.accountId)
-      if (startRes.code === 0 || startRes.code === 200) {
-        showSuccess('Cookie更新成功，连接已启动')
-      } else {
-        showSuccess('Cookie更新成功，请手动启动连接')
-      }
-    } catch (startError) {
-      showSuccess('Cookie更新成功，请手动启动连接')
-    }
-
+    const resData = cookieUpdateRes.data as any
     emit('success')
     handleClose()
 
+    if (resData?.wsConnected === true) {
+      showSuccess('扫码更新成功，WebSocket已稳定连接')
+    } else if (resData?.needCaptcha === true) {
+      showError(resData.message || 'Cookie已更新，但触发闲鱼滑块验证，请按指引过滑块')
+      emit('need-captcha')
+    } else {
+      showError(resData?.message || 'Cookie已更新，但WebSocket连接未成功，请查看操作日志')
+    }
+
   } catch (error: any) {
-    console.error('更新失败:', error)
-    showError(error.message || '更新失败')
+    console.error('扫码更新失败:', error)
+    if (!error?.messageShown) {
+      showError(error.message || '扫码更新失败')
+    }
     handleClose()
   }
 }
@@ -173,6 +213,8 @@ const handleClose = () => {
             <p v-if="sessionId" class="session-id">会话ID: {{ sessionId }}</p>
           </div>
           <div class="modal-footer">
+            <button v-if="verificationUrl" class="btn btn-primary" @click="openVerificationPage">前往安全验证</button>
+            <button v-if="status === 'expired' || status === 'cancelled' || status === 'error' || status === 'not_found'" class="btn btn-primary" @click="generateQR">重新获取二维码</button>
             <button class="btn btn-secondary" @click="handleClose">取消</button>
           </div>
         </div>

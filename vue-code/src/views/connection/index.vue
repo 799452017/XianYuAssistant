@@ -71,6 +71,14 @@ const handleSelectAccount = (account: any) => {
   }
 }
 
+// 同步右侧详情面板的最新状态到左侧账号卡片列表
+const handleDetailStatusChange = (status: any) => {
+  if (!status || !status.xianyuAccountId) return
+  const nextMap = new Map(allConnectionStatuses.value)
+  nextMap.set(Number(status.xianyuAccountId), status)
+  allConnectionStatuses.value = nextMap
+}
+
 onMounted(() => {
   checkScreenSize()
   window.addEventListener('resize', checkScreenSize)
@@ -114,6 +122,7 @@ onUnmounted(() => {
           <ConnectionDetail
             :account-id="selectedAccountId"
             :account-name="selectedAccountName"
+            @status-change="handleDetailStatusChange"
           />
         </div>
       </div>

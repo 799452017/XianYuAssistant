@@ -19,19 +19,23 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(BusinessException.class)
     public Map<String, Object> handleBusinessException(BusinessException e) {
         Map<String, Object> result = new HashMap<>();
+        String msg = e.getMessage() != null ? e.getMessage() : "业务处理失败";
         result.put("code", e.getCode());
-        result.put("message", e.getMessage());
+        result.put("msg", msg);
+        result.put("message", msg);
         return result;
     }
     
     /**
-     * 处理验证码异常
+     * 处理验证码异常（使用 1001 业务码，避免 401 触发前端退出系统登录）
      */
     @ExceptionHandler(CaptchaRequiredException.class)
     public Map<String, Object> handleCaptchaRequiredException(CaptchaRequiredException e) {
         Map<String, Object> result = new HashMap<>();
-        result.put("code", 401);
-        result.put("message", e.getMessage());
+        String msg = e.getMessage() != null ? e.getMessage() : "需要完成滑块验证";
+        result.put("code", 1001);
+        result.put("msg", msg);
+        result.put("message", msg);
         result.put("captchaUrl", e.getCaptchaUrl());
         return result;
     }
@@ -42,8 +46,10 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(Exception.class)
     public Map<String, Object> handleException(Exception e) {
         Map<String, Object> result = new HashMap<>();
+        String msg = e.getMessage() != null ? e.getMessage() : "系统异常";
         result.put("code", 500);
-        result.put("message", e.getMessage() != null ? e.getMessage() : "系统异常");
+        result.put("msg", msg);
+        result.put("message", msg);
         return result;
     }
 }

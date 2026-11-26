@@ -1,8 +1,8 @@
 package com.feijimiao.xianyuassistant.controller.dto;
 
 import lombok.Data;
-import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 二维码登录会话
@@ -11,15 +11,15 @@ import java.util.Map;
 public class QRLoginSession {
     
     private String sessionId;
-    private String status; // waiting, scanned, success, expired, cancelled, verification_required
+    private volatile String status; // waiting, scanned, success, expired, cancelled, verification_required, error
     private String qrCodeUrl;
     private String qrContent;
-    private Map<String, String> cookies = new HashMap<>();
-    private String unb;
+    private Map<String, String> cookies = new ConcurrentHashMap<>();
+    private volatile String unb;
     private long createdTime;
     private long expireTime = 300000; // 5分钟过期（毫秒）
-    private Map<String, String> params = new HashMap<>();
-    private String verificationUrl;
+    private Map<String, String> params = new ConcurrentHashMap<>();
+    private volatile String verificationUrl;
     
     public QRLoginSession(String sessionId) {
         this.sessionId = sessionId;

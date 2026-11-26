@@ -14,6 +14,7 @@ interface Props {
 interface Emits {
   (e: 'update:modelValue', value: boolean): void
   (e: 'success'): void
+  (e: 'need-captcha'): void
 }
 
 const props = defineProps<Props>()
@@ -43,10 +44,18 @@ const handleSubmit = async () => {
       cookieText: cookieText.value.trim()
     })
 
-    if (response.code === 200) {
-      showSuccess('Cookie更新成功')
+    if (response.code === 0 || response.code === 200) {
+      const data = response.data as any
       handleClose()
       emit('success')
+      if (data?.needCaptcha) {
+        showError(data.message || 'Cookie已更新，但需要完成一次滑块验证')
+        emit('need-captcha')
+      } else if (data?.wsConnected === false) {
+        showError(data.message || 'Cookie已更新，但WebSocket自动连接未成功')
+      } else {
+        showSuccess(data?.message || 'Cookie更新成功，WebSocket已自动连接')
+      }
     }
   } catch (error: any) {
     console.error('Cookie更新失败:', error)

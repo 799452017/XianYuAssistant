@@ -443,7 +443,7 @@ public class QRLoginServiceImpl implements QRLoginService {
             }
             
             // 超时处理
-            if (session != null && !Arrays.asList("success", "expired", "cancelled", "verification_required").contains(session.getStatus())) {
+            if (session != null && !Arrays.asList("success", "expired", "cancelled", "verification_required", "error").contains(session.getStatus())) {
                 session.setStatus("expired");
                 log.info("二维码监控超时，标记为过期: {}", sessionId);
             }
@@ -451,7 +451,7 @@ public class QRLoginServiceImpl implements QRLoginService {
         } catch (Exception e) {
             log.error("监控二维码状态失败", e);
             QRLoginSession session = sessions.get(sessionId);
-            if (session != null) {
+            if (session != null && !Arrays.asList("success", "error").contains(session.getStatus())) {
                 session.setStatus("expired");
             }
         }
@@ -492,37 +492,70 @@ public class QRLoginServiceImpl implements QRLoginService {
                                 log.warn("   - 会话ID: {}", session.getSessionId());
                                 log.warn("   - 验证URL: {}", iframeUrl);
                             } else {
-                                // 登录成功，保存Cookie
-                                log.info("🎉 扫码确认成功！开始保存账号信息...");
-                                session.setStatus("success");
-                                
-                                // 保存之前的 _m_h5_tk 和 _m_h5_tk_enc（如果存在）
-                                String existingMh5tk = session.getCookies().get("_m_h5_tk");
-                                String existingMh5tkEnc = session.getCookies().get("_m_h5_tk_enc");
-                                
+                                // 登录确认成功：必须先完整提取Cookie、同步SSO并刷新登录态_m_h5_tk，最后再标记 status=success
+                                // 防止前端轮询在Cookie未提取完之前提前拉取到残缺Cookie！
+                                log.info("🎉 扫码确认成功！开始提取并完善登录态Cookie...");
+
                                 List<String> cookieHeaders = response.headers("Set-Cookie");
                                 for (String cookie : cookieHeaders) {
                                     String[] parts = cookie.split(";")[0].split("=", 2);
                                     if (parts.length == 2) {
-                                        session.getCookies().put(parts[0], parts[1]);
-                                        if ("unb".equals(parts[0])) {
-                                            session.setUnb(parts[1]);
-                                            log.info("✅ 获取到UNB: {}", parts[1]);
+                                        String ckName = parts[0].trim();
+                                        String ckVal = parts[1].trim();
+                                        if (!ckVal.isEmpty()) {
+                                            session.getCookies().put(ckName, ckVal);
+                                            if ("unb".equals(ckName)) {
+                                                session.setUnb(ckVal);
+                                                log.info("✅ 获取到UNB: {}", ckVal);
+                                            }
                                         }
                                     }
                                 }
-                                
-                                // 恢复之前获取的 _m_h5_tk（如果响应中没有新的）
-                                if (existingMh5tk != null && !session.getCookies().containsKey("_m_h5_tk")) {
-                                    session.getCookies().put("_m_h5_tk", existingMh5tk);
-                                    log.info("✅ 恢复之前获取的_m_h5_tk: {}", existingMh5tk.substring(0, Math.min(20, existingMh5tk.length())));
+
+                                // 处理返回数据中的 asyncUrls 跨域SSO种Cookie（对齐淘宝/闲鱼mini_login协议）
+                                if (data.has("asyncUrls") && data.get("asyncUrls").isJsonArray()) {
+                                    com.feijimiao.xianyuassistant.utils.SessionCookieJar ssoJar =
+                                            new com.feijimiao.xianyuassistant.utils.SessionCookieJar(session.getCookies());
+                                    OkHttpClient ssoClient = ssoJar.createHttpClient();
+                                    data.getAsJsonArray("asyncUrls").forEach(elem -> {
+                                        try {
+                                            String ssoUrl = elem.getAsString();
+                                            if (ssoUrl != null && ssoUrl.startsWith("http")) {
+                                                Request ssoReq = new Request.Builder()
+                                                        .url(ssoUrl)
+                                                        .headers(generateHeaders())
+                                                        .get()
+                                                        .build();
+                                                try (Response ignored = ssoClient.newCall(ssoReq).execute()) {
+                                                }
+                                            }
+                                        } catch (Exception ssoEx) {
+                                            log.debug("执行SSO asyncUrl异常: {}", ssoEx.getMessage());
+                                        }
+                                    });
+                                    session.getCookies().putAll(ssoJar.getCookieMap());
+                                    if (session.getUnb() == null && session.getCookies().containsKey("unb")) {
+                                        session.setUnb(session.getCookies().get("unb"));
+                                    }
                                 }
-                                if (existingMh5tkEnc != null && !session.getCookies().containsKey("_m_h5_tk_enc")) {
-                                    session.getCookies().put("_m_h5_tk_enc", existingMh5tkEnc);
+
+                                // 关键：使用扫码后的新登录态Cookie重新请求 h5api 换取匹配的 _m_h5_tk（替代扫码前的匿名 _m_h5_tk）
+                                try {
+                                    refreshLoggedInMh5tk(session);
+                                } catch (Exception tkEx) {
+                                    log.warn("扫码后刷新登录态_m_h5_tk异常: {}", tkEx.getMessage());
                                 }
-                                
-                                // 保存Cookie到数据库
-                                saveCookieToDatabase(session);
+
+                                if (session.getUnb() == null || session.getUnb().isEmpty()) {
+                                    log.error("❌ 扫码响应未包含有效UNB: sessionId={}", session.getSessionId());
+                                    session.setStatus("error");
+                                } else {
+                                    // 不在此处私自写库覆盖已有账号备注或造成串号，统一由前端对应入口（添加账号 / 更新指定账号Cookie）落库
+                                    log.info("✅ 扫码会话Cookie准备就绪: sessionId={}, unb={}, 字段数={}, 包含_m_h5_tk={}",
+                                            session.getSessionId(), session.getUnb(),
+                                            session.getCookies().size(), session.getCookies().containsKey("_m_h5_tk"));
+                                    session.setStatus("success");
+                                }
                             }
                         }
                         
@@ -579,10 +612,13 @@ public class QRLoginServiceImpl implements QRLoginService {
                 response.setMessage("用户取消登录");
                 break;
             case "verification_required":
-                response.setMessage("账号被风控，需要手机验证");
+                response.setMessage("账号触发安全验证，请完成验证或使用网页版手动更新Cookie");
                 if (session.getVerificationUrl() != null) {
                     response.setVerificationUrl(session.getVerificationUrl());
                 }
+                break;
+            case "error":
+                response.setMessage("登录凭证提取失败，请重新生成二维码再试");
                 break;
             default:
                 response.setMessage("未知状态");
@@ -594,8 +630,8 @@ public class QRLoginServiceImpl implements QRLoginService {
     
     /**
      * 转换后端状态为前端期望的状态
-     * 后端: waiting, scanned, success, expired, cancelled, verification_required
-     * 前端: pending, scanned, confirmed, expired
+     * 后端: waiting, scanned, success, expired, cancelled, verification_required, error
+     * 前端: pending, scanned, confirmed, expired, cancelled, verification_required, error
      */
     private String convertToFrontendStatus(String backendStatus) {
         switch (backendStatus) {
@@ -607,9 +643,52 @@ public class QRLoginServiceImpl implements QRLoginService {
             case "expired":
             case "cancelled":
             case "verification_required":
+            case "error":
                 return backendStatus;
             default:
                 return "pending";
+        }
+    }
+
+    /**
+     * 扫码登录确认后，携带已登录Cookie请求 h5api 刷新与登录态绑定的 _m_h5_tk
+     */
+    private void refreshLoggedInMh5tk(QRLoginSession session) throws IOException {
+        com.feijimiao.xianyuassistant.utils.SessionCookieJar jar =
+                new com.feijimiao.xianyuassistant.utils.SessionCookieJar(session.getCookies());
+        OkHttpClient client = jar.createHttpClient();
+        Map<String, Object> data = new HashMap<>();
+        data.put("bizScene", "home");
+        String dataStr = gson.toJson(data);
+        long t = System.currentTimeMillis();
+        String appKey = "34839810";
+        String token = jar.getMh5tkToken();
+        String sign = md5(token + "&" + t + "&" + appKey + "&" + dataStr);
+
+        HttpUrl url = HttpUrl.parse(API_H5_TK).newBuilder()
+                .addQueryParameter("jsv", "2.7.2")
+                .addQueryParameter("appKey", appKey)
+                .addQueryParameter("t", String.valueOf(t))
+                .addQueryParameter("sign", sign)
+                .addQueryParameter("v", "1.0")
+                .addQueryParameter("type", "originaljson")
+                .addQueryParameter("dataType", "json")
+                .addQueryParameter("timeout", "20000")
+                .addQueryParameter("api", "mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get")
+                .addQueryParameter("data", dataStr)
+                .build();
+
+        Request req = new Request.Builder()
+                .url(url)
+                .headers(generateApiHeaders())
+                .header("Referer", "https://www.goofish.com/")
+                .header("Origin", "https://www.goofish.com")
+                .post(RequestBody.create(new byte[0]))
+                .build();
+
+        try (Response ignored = client.newCall(req).execute()) {
+            session.getCookies().putAll(jar.getCookieMap());
+            log.info("扫码后刷新登录态_m_h5_tk完成: 包含_m_h5_tk={}", session.getCookies().containsKey("_m_h5_tk"));
         }
     }
     
