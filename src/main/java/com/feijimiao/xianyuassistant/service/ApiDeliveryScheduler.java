@@ -106,8 +106,8 @@ public class ApiDeliveryScheduler {
 
         log.info("【账号{}】API发货: 发现{}笔待发货订单(WS未连接)", accountId, toDeliver.size());
 
-        int randomDelay = 20 + ThreadLocalRandom.current().nextInt(11);
-        log.info("【账号{}】随机延迟{}秒后开始发货", accountId, randomDelay);
+        int randomDelay = 1 + ThreadLocalRandom.current().nextInt(3);
+        log.info("【账号{}】延迟{}秒后开始API兜底发货", accountId, randomDelay);
         try { Thread.sleep(randomDelay * 1000L); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
 
         for (int i = 0; i < toDeliver.size(); i++) {

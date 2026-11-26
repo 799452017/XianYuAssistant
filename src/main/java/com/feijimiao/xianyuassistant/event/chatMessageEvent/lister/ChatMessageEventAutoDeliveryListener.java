@@ -1,6 +1,7 @@
 package com.feijimiao.xianyuassistant.event.chatMessageEvent.lister;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.feijimiao.xianyuassistant.config.WebSocketConfig;
 import com.feijimiao.xianyuassistant.entity.XianyuGoodsOrder;
 import com.feijimiao.xianyuassistant.entity.XianyuGoodsInfo;
 import com.feijimiao.xianyuassistant.event.chatMessageEvent.ChatMessageData;
@@ -45,6 +46,9 @@ public class ChatMessageEventAutoDeliveryListener {
     @Autowired
     private AutoDeliveryService autoDeliveryService;
 
+    @Autowired
+    private WebSocketConfig webSocketConfig;
+
     @Async
     @EventListener
     public void handleChatMessageReceived(ChatMessageReceivedEvent event) {
@@ -85,9 +89,10 @@ public class ChatMessageEventAutoDeliveryListener {
                 return;
             }
 
+            // 关联 simulate-human-typing 配置（默认 false，实现付款毫秒级秒发）
             autoDeliveryService.executeDelivery(
                     recordId, accountId, message.getXyGoodsId(), message.getSId(),
-                    message.getOrderId(), buyerUserName, true);
+                    message.getOrderId(), buyerUserName, webSocketConfig.isSimulateHumanTyping());
 
         } catch (Exception e) {
             log.error("【账号{}】处理自动发货异常: pnmId={}", accountId, message.getPnmId(), e);

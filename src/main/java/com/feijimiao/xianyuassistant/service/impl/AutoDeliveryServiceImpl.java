@@ -67,6 +67,13 @@ public class AutoDeliveryServiceImpl implements AutoDeliveryService {
 
     @Autowired
     private DeliveryStrategyResolver deliveryStrategyResolver;
+
+    @Autowired
+    private com.feijimiao.xianyuassistant.config.WebSocketConfig webSocketConfig;
+
+    @Autowired
+    @org.springframework.beans.factory.annotation.Qualifier("taskExecutor")
+    private java.util.concurrent.Executor taskExecutor;
     
     @Override
     public XianyuGoodsConfig getGoodsConfig(Long accountId, String xyGoodsId) {
@@ -163,9 +170,11 @@ public class AutoDeliveryServiceImpl implements AutoDeliveryService {
             String content = deliveryConfig.getAutoDeliveryContent();
             log.info("【账号{}】准备发送自动发货消息: content={}", accountId, content);
 
-            HumanLikeDelayUtils.mediumDelay();
-            HumanLikeDelayUtils.thinkingDelay();
-            HumanLikeDelayUtils.typingDelay(content.length());
+            if (webSocketConfig.isSimulateHumanTyping()) {
+                HumanLikeDelayUtils.mediumDelay();
+                HumanLikeDelayUtils.thinkingDelay();
+                HumanLikeDelayUtils.typingDelay(content.length());
+            }
             
             String cid = sId.replace("@goofish", "");
             String toId = cid;
@@ -323,32 +332,74 @@ public class AutoDeliveryServiceImpl implements AutoDeliveryService {
                 return;
             }
 
-            OrderDetailFetcher.OrderDetailInfo orderDetail = orderDetailFetcher.fetch(accountId, xyGoodsId, orderId);
-            if (orderDetail == null && orderId != null && !orderId.isEmpty()) {
-                log.warn("【账号{}】获取订单详情失败(可能Cookie过期或API异常)，中断发货: orderId={}", accountId, orderId);
-                String failReason = "获取订单详情失败(可能Cookie过期)，请检查Cookie状态";
-                updateRecordState(recordId, -1, null, failReason);
-                emailNotifyService.sendAutoDeliveryFailEmail(null, xyGoodsId, orderId, failReason);
-                return;
+            // 预先从本地数据库查询该商品的全部发货配置，判断是否可以走“单规格0等待秒发快速通道”
+            List<XianyuGoodsAutoDeliveryConfig> allConfigs =
+                    autoDeliveryConfigMapper.findByAccountIdAndGoodsId(accountId, xyGoodsId);
+            XianyuGoodsAutoDeliveryConfig defaultConfig = null;
+            boolean hasSkuSpecificConfig = false;
+            if (allConfigs != null) {
+                for (XianyuGoodsAutoDeliveryConfig cfg : allConfigs) {
+                    if (cfg.getSkuId() == null || cfg.getSkuId().isEmpty()) {
+                        defaultConfig = cfg;
+                    } else {
+                        hasSkuSpecificConfig = true;
+                    }
+                }
             }
-            String orderSkuId = orderDetail != null ? orderDetail.skuId : null;
-            int buyNum = (orderDetail != null && orderDetail.buyNum != null && orderDetail.buyNum > 0) ? orderDetail.buyNum : 1;
-            log.info("【账号{}】订单SKU: orderId={}, skuId={}, buyNum={}", accountId, orderId, orderSkuId, buyNum);
 
-            if (orderDetail != null) {
-                orderMapper.updateOrderDetail(recordId, orderDetail.buyerUserName, orderDetail.orderCreateTime, orderDetail.paySuccessTime, orderDetail.consignTime, orderDetail.skuName, orderDetail.goodsTitle, orderDetail.totalPrice, orderDetail.buyNum);
-            }
+            boolean wsConnected = webSocketService.isConnected(accountId);
+            int defaultMode = (defaultConfig != null && defaultConfig.getDeliveryMode() != null)
+                    ? defaultConfig.getDeliveryMode() : 1;
+            // 单规格 + 固定文本/图片模式(deliveryMode == 1) + WS在线：无需前置阻塞请求闲鱼订单详情API，直接毫秒级秒发，详情后台异步回填！
+            boolean canFastDeliver = wsConnected && !hasSkuSpecificConfig && defaultConfig != null && defaultMode == 1;
 
             XianyuGoodsAutoDeliveryConfig deliveryConfig = null;
-            if (orderSkuId != null && !orderSkuId.isEmpty()) {
-                deliveryConfig = autoDeliveryConfigMapper.findByAccountIdAndGoodsIdAndSkuId(accountId, xyGoodsId, orderSkuId);
-            }
-            if (deliveryConfig == null) {
-                deliveryConfig = autoDeliveryConfigMapper.findByAccountIdAndGoodsIdNoSku(accountId, xyGoodsId);
+            int buyNum = 1;
+
+            if (canFastDeliver) {
+                deliveryConfig = defaultConfig;
+                log.info("【账号{}】⚡ 命中单规格快速秒发通道，跳过前置订单详情HTTP等待: orderId={}", accountId, orderId);
+                if (orderId != null && !orderId.isEmpty()) {
+                    java.util.concurrent.CompletableFuture.runAsync(
+                            () -> enrichOrderDetailAsync(recordId, accountId, xyGoodsId, orderId), taskExecutor);
+                }
+            } else {
+                OrderDetailFetcher.OrderDetailInfo orderDetail = orderDetailFetcher.fetch(accountId, xyGoodsId, orderId);
+                if (orderDetail == null && orderId != null && !orderId.isEmpty()) {
+                    // 仅允许单规格 + 固定文本/图片模式(defaultMode == 1)降级发货；卡密模式(deliveryMode == 2)必须拿到真实 buyNum 严禁按1张漏发！
+                    if (!hasSkuSpecificConfig && defaultConfig != null && defaultMode == 1) {
+                        log.warn("【账号{}】前置获取订单详情未成功，固定内容模式降级使用默认无SKU配置继续发货: orderId={}", accountId, orderId);
+                        deliveryConfig = defaultConfig;
+                    } else {
+                        log.warn("【账号{}】获取订单详情失败(多规格或卡密商品需核实SKU与购买数量)，中断发货: orderId={}", accountId, orderId);
+                        String failReason = "获取订单详情失败(可能Cookie过期)，无法核实规格或购买数量，请检查Cookie状态";
+                        updateRecordState(recordId, -1, null, failReason);
+                        emailNotifyService.sendAutoDeliveryFailEmail(null, xyGoodsId, orderId, failReason);
+                        return;
+                    }
+                } else {
+                    String orderSkuId = orderDetail != null ? orderDetail.skuId : null;
+                    buyNum = (orderDetail != null && orderDetail.buyNum != null && orderDetail.buyNum > 0) ? orderDetail.buyNum : 1;
+                    log.info("【账号{}】订单SKU: orderId={}, skuId={}, buyNum={}", accountId, orderId, orderSkuId, buyNum);
+
+                    if (orderDetail != null) {
+                        orderMapper.updateOrderDetail(recordId, orderDetail.buyerUserName, orderDetail.orderCreateTime,
+                                orderDetail.paySuccessTime, orderDetail.consignTime, orderDetail.skuName,
+                                orderDetail.goodsTitle, orderDetail.totalPrice, orderDetail.buyNum);
+                    }
+
+                    if (orderSkuId != null && !orderSkuId.isEmpty()) {
+                        deliveryConfig = autoDeliveryConfigMapper.findByAccountIdAndGoodsIdAndSkuId(accountId, xyGoodsId, orderSkuId);
+                    }
+                    if (deliveryConfig == null) {
+                        deliveryConfig = defaultConfig != null ? defaultConfig
+                                : autoDeliveryConfigMapper.findByAccountIdAndGoodsIdNoSku(accountId, xyGoodsId);
+                    }
+                }
             }
 
             if (deliveryConfig == null) {
-                log.warn("【账号{}】商品无匹配的发货配置: xyGoodsId={}, skuId={}", accountId, xyGoodsId, orderSkuId);
+                log.warn("【账号{}】商品无匹配的发货配置: xyGoodsId={}", accountId, xyGoodsId);
                 updateRecordState(recordId, -1, null, "无匹配的发货配置");
                 return;
             }
@@ -356,7 +407,6 @@ public class AutoDeliveryServiceImpl implements AutoDeliveryService {
             int deliveryMode = deliveryConfig.getDeliveryMode() != null ? deliveryConfig.getDeliveryMode() : 1;
             String cid = sId.replace("@goofish", "");
             String toId = cid;
-            boolean wsConnected = webSocketService.isConnected(accountId);
             boolean anySuccess = false;
             StringBuilder allContent = new StringBuilder();
 
@@ -424,6 +474,13 @@ public class AutoDeliveryServiceImpl implements AutoDeliveryService {
                     HumanLikeDelayUtils.mediumDelay();
                     HumanLikeDelayUtils.thinkingDelay();
                     HumanLikeDelayUtils.typingDelay(content.length());
+                } else if (i > 0) {
+                    // 单笔拍多件连发多条卡密时，第2条起保留400ms微间隔，防IM网关瞬时限流吞消息
+                    try {
+                        Thread.sleep(400);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
 
                 log.info("【账号{}】准备发送发货文本[{}/{}]: content长度={}, deliveryMode={}", accountId, i + 1, buyNum, content.length(), deliveryMode);
@@ -503,15 +560,33 @@ public class AutoDeliveryServiceImpl implements AutoDeliveryService {
         }
     }
 
+    private void enrichOrderDetailAsync(Long recordId, Long accountId, String xyGoodsId, String orderId) {
+        try {
+            OrderDetailFetcher.OrderDetailInfo orderDetail = orderDetailFetcher.fetch(accountId, xyGoodsId, orderId);
+            if (orderDetail != null) {
+                orderMapper.updateOrderDetail(recordId, orderDetail.buyerUserName, orderDetail.orderCreateTime,
+                        orderDetail.paySuccessTime, orderDetail.consignTime, orderDetail.skuName,
+                        orderDetail.goodsTitle, orderDetail.totalPrice, orderDetail.buyNum);
+                log.info("【账号{}】异步回填订单详情完成: recordId={}, orderId={}", accountId, recordId, orderId);
+            }
+        } catch (Exception e) {
+            log.debug("【账号{}】异步回填订单详情异常: orderId={}, err={}", accountId, orderId, e.getMessage());
+        }
+    }
+
     private void executeAutoConfirmShipment(Long accountId, String orderId) {
         if (orderId == null || orderId.isEmpty()) {
             log.warn("【账号{}】订单ID为空，无法自动确认发货", accountId);
             return;
         }
         log.info("【账号{}】提交异步自动确认发货: orderId={}", accountId, orderId);
-        new Thread(() -> {
+        taskExecutor.execute(() -> {
             try {
-                HumanLikeDelayUtils.longDelay();
+                if (webSocketConfig.isSimulateHumanTyping()) {
+                    HumanLikeDelayUtils.longDelay();
+                } else {
+                    Thread.sleep(500);
+                }
                 String result = orderService.confirmShipment(accountId, orderId);
                 if (result != null) {
                     log.info("【账号{}】✅ 自动确认发货成功: orderId={}", accountId, orderId);
@@ -519,10 +594,13 @@ public class AutoDeliveryServiceImpl implements AutoDeliveryService {
                 } else {
                     log.error("【账号{}】❌ 自动确认发货失败: orderId={}", accountId, orderId);
                 }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                log.warn("【账号{}】自动确认发货等待被中断: orderId={}", accountId, orderId);
             } catch (Exception e) {
                 log.error("【账号{}】自动确认发货异常: orderId={}", accountId, orderId, e);
             }
-        }).start();
+        });
     }
 
     private void updateRecordState(Long recordId, Integer state, String content, String failReason) {
