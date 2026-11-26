@@ -962,22 +962,16 @@ export function useAutoReply() {
       } else if (result.code === 1001) {
         showAiConfigTip()
       } else {
-        // 检查是否是AI未配置的错误
-        const errorMsg = result.msg || '上传资料失败'
-        if (errorMsg.includes('AI') || errorMsg.includes('API') || errorMsg.includes('配置')) {
+        const errorMsg = result.msg || result.message || '上传资料失败'
+        if (errorMsg.includes('向量库未初始化')) {
           throw new Error('请前往系统设置->AI服务配置中完成配置')
         }
         throw new Error(errorMsg)
       }
     } catch (error: any) {
       console.error('上传资料失败:', error)
-      // 如果错误消息包含配置相关提示，使用友好提示
       const errorMsg = error.message || '上传资料失败'
-      if (errorMsg.includes('配置') || errorMsg.includes('AI') || errorMsg.includes('API')) {
-        showError('请前往系统设置->AI服务配置中完成配置')
-      } else {
-        showError(errorMsg)
-      }
+      showError(errorMsg)
     } finally {
       uploading.value = false
     }
@@ -1004,23 +998,20 @@ export function useAutoReply() {
       const result = await response.json()
       if (result.code === 0 || result.code === 200) {
         dataList.value = result.data || []
+      } else if (result.code === 1001) {
+        showAiConfigTip()
+        dataList.value = []
       } else {
-        // 检查是否是AI未配置的错误
-        const errorMsg = result.msg || '查询资料失败'
-        if (errorMsg.includes('AI') || errorMsg.includes('API') || errorMsg.includes('配置')) {
+        const errorMsg = result.msg || result.message || '查询资料失败'
+        if (errorMsg.includes('向量库未初始化')) {
           throw new Error('请前往系统设置->AI服务配置中完成配置')
         }
         throw new Error(errorMsg)
       }
     } catch (error: any) {
       console.error('查询资料失败:', error)
-      // 如果错误消息包含配置相关提示，使用友好提示
       const errorMsg = error.message || '查询资料失败'
-      if (errorMsg.includes('配置') || errorMsg.includes('AI') || errorMsg.includes('API')) {
-        showError('请前往系统设置->AI服务配置中完成配置')
-      } else {
-        showError(errorMsg)
-      }
+      showError(errorMsg)
       dataList.value = []
     } finally {
       dataLoading.value = false
@@ -1049,23 +1040,19 @@ export function useAutoReply() {
             showSuccess('资料删除成功')
             // 从列表中移除已删除项
             dataList.value = dataList.value.filter(item => item.documentId !== documentId)
+          } else if (result.code === 1001) {
+            showAiConfigTip()
           } else {
-            // 检查是否是AI未配置的错误
-            const errorMsg = result.msg || '删除资料失败'
-            if (errorMsg.includes('AI') || errorMsg.includes('API') || errorMsg.includes('配置')) {
+            const errorMsg = result.msg || result.message || '删除资料失败'
+            if (errorMsg.includes('向量库未初始化')) {
               throw new Error('请前往系统设置->AI服务配置中完成配置')
             }
             throw new Error(errorMsg)
           }
         } catch (error: any) {
           console.error('删除资料失败:', error)
-          // 如果错误消息包含配置相关提示，使用友好提示
           const errorMsg = error.message || '删除资料失败'
-          if (errorMsg.includes('配置') || errorMsg.includes('AI') || errorMsg.includes('API')) {
-            showError('请前往系统设置->AI服务配置中完成配置')
-          } else {
-            showError(errorMsg)
-          }
+          showError(errorMsg)
         }
       }
     }

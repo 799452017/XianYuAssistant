@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, markRaw } from 'vue'
+import { ref, computed, onMounted, markRaw } from 'vue'
 import { useRouter } from 'vue-router'
 import { getCurrentUser, changePassword } from '@/api/system'
 import { logout } from '@/api/auth'
@@ -78,6 +78,10 @@ const embeddingModel = ref(DEFAULT_EMBEDDING_MODEL)
 const embeddingSaving = ref(false)
 const showEmbeddingApiKey = ref(false)
 const showEmbeddingConfig = ref(false)
+
+const isDeepSeekWithoutCustomEmbedding = computed(() => {
+  return aiBaseUrl.value.toLowerCase().includes('deepseek.com') && !embeddingBaseUrl.value.trim()
+})
 
 // 邮箱通知配置
 const EMAIL_SMTP_HOST_KEY = 'email_smtp_host'
@@ -206,6 +210,9 @@ async function loadEmbeddingConfig() {
     }
     if (modelRes.code === 200 && modelRes.data && modelRes.data.settingValue) {
       embeddingModel.value = modelRes.data.settingValue
+    }
+    if (embeddingApiKey.value || embeddingBaseUrl.value || aiBaseUrl.value.toLowerCase().includes('deepseek.com')) {
+      showEmbeddingConfig.value = true
     }
   } catch (e) {
     console.error('获取Embedding配置失败:', e)
@@ -411,7 +418,7 @@ async function handleSaveEmbeddingConfig() {
     ])
 
     if (keyRes.code === 200 && urlRes.code === 200 && modelRes.code === 200) {
-      toast.success('Embedding 配置保存成功，重启服务后生效')
+      toast.success('Embedding 配置保存成功，已立即生效')
     }
   } catch (e) {
     console.error('保存Embedding配置失败:', e)
@@ -968,9 +975,15 @@ function handleBackupMenuEnter() {
             </button>
           </div>
           <p class="settings__desc">
-            配置向量嵌入模型（用于 RAG 知识库）。默认共用对话模型的配置。
-            <strong>注意：修改后需要重启服务才能生效。</strong>
+            配置向量嵌入模型（用于 RAG 知识库「添加资料」功能）。默认共用对话模型的配置，修改后立即生效，无需重启服务。
           </p>
+          <div
+            v-if="isDeepSeekWithoutCustomEmbedding"
+            style="margin-bottom: 14px; padding: 10px 12px; border-radius: 8px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35); color: #b45309; font-size: 13px; line-height: 1.6;"
+          >
+            检测到对话模型使用了 DeepSeek 官方接口（<code>api.deepseek.com</code>），该接口暂不提供 <code>/v1/embeddings</code> 向量服务，直接上传 RAG 知识库会报 404。
+            如需使用知识库「添加资料」，请在下方单独配置支持 Embedding 的服务（如阿里云百炼 <code>https://dashscope.aliyuncs.com/compatible-mode</code> 或硅基流动）；若仅需绑定商品说明，也可直接在自动回复页使用上方的「固定资料」功能。
+          </div>
           <div class="settings__form">
             <!-- 折叠内容 -->
             <div v-if="showEmbeddingConfig" class="settings__collapse-content">

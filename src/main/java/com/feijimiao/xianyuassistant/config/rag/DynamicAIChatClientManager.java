@@ -151,8 +151,8 @@ public class DynamicAIChatClientManager {
         String baseUrl = getSettingValue(AI_BASE_URL_SETTING);
         String model = getSettingValue(AI_MODEL_SETTING);
 
-        info.setBaseUrl(baseUrl != null ? baseUrl : DEFAULT_BASE_URL);
-        info.setModel(model != null ? model : DEFAULT_MODEL);
+        info.setBaseUrl(normalizeBaseUrl(baseUrl));
+        info.setModel((model != null && !model.trim().isEmpty()) ? model.trim() : DEFAULT_MODEL);
 
         if (apiKey == null || apiKey.trim().isEmpty()) {
             info.setAvailable(false);
@@ -186,7 +186,7 @@ public class DynamicAIChatClientManager {
      * 构建ChatClient实例
      */
     private ChatClient buildChatClient(String apiKey, String baseUrl, String model) {
-        String effectiveBaseUrl = (baseUrl != null && !baseUrl.trim().isEmpty()) ? baseUrl.trim() : DEFAULT_BASE_URL;
+        String effectiveBaseUrl = normalizeBaseUrl(baseUrl);
         String effectiveModel = (model != null && !model.trim().isEmpty()) ? model.trim() : DEFAULT_MODEL;
 
         // 创建OpenAiApi实例
@@ -225,6 +225,27 @@ public class DynamicAIChatClientManager {
         if (a == null && b == null) return true;
         if (a == null || b == null) return false;
         return a.equals(b);
+    }
+
+    /**
+     * 规范化 Base URL：去除首尾空白、末尾斜杠以及多余的 /v1 后缀
+     * （Spring AI OpenAiApi 会自动拼接 /v1/chat/completions）
+     */
+    public static String normalizeBaseUrl(String rawUrl) {
+        if (rawUrl == null || rawUrl.trim().isEmpty()) {
+            return DEFAULT_BASE_URL;
+        }
+        String url = rawUrl.trim();
+        while (url.endsWith("/")) {
+            url = url.substring(0, url.length() - 1);
+        }
+        if (url.length() > 3 && url.regionMatches(true, url.length() - 3, "/v1", 0, 3)) {
+            url = url.substring(0, url.length() - 3);
+            while (url.endsWith("/")) {
+                url = url.substring(0, url.length() - 1);
+            }
+        }
+        return url.isEmpty() ? DEFAULT_BASE_URL : url;
     }
 
     /**

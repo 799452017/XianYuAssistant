@@ -648,8 +648,8 @@ public class AIServiceImpl implements AIService {
         log.info("[AI RAG] 切片完成, 切片数={}, 写入SimpleVectorStore...", chunks.size());
         vectorStore.add(chunks);
 
-        // 持久化保存到文件
-        dynamicVectorStoreManager.saveToFile();
+        // 持久化保存到文件（传入当前写入的实例，防止并发热重建丢失）
+        dynamicVectorStoreManager.saveToFile(vectorStore);
 
         log.info("[AI RAG] 写入SimpleVectorStore完成");
     }
@@ -698,8 +698,8 @@ public class AIServiceImpl implements AIService {
         log.info("[AI RAG] 删除SimpleVectorStore数据, documentId={}", documentId);
         vectorStore.delete(List.of(documentId));
 
-        // 持久化保存到文件
-        dynamicVectorStoreManager.saveToFile();
+        // 持久化保存到文件（传入当前写入的实例，防止并发热重建丢失）
+        dynamicVectorStoreManager.saveToFile(vectorStore);
 
         log.info("[AI RAG] 删除SimpleVectorStore数据完成, documentId={}", documentId);
     }

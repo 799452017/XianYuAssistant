@@ -2,6 +2,7 @@ package com.feijimiao.xianyuassistant.controller;
 
 import com.feijimiao.xianyuassistant.common.ResultObject;
 import com.feijimiao.xianyuassistant.config.rag.DynamicAIChatClientManager;
+import com.feijimiao.xianyuassistant.config.rag.DynamicVectorStoreManager;
 import com.feijimiao.xianyuassistant.controller.dto.ChatWithAIReqDTO;
 import com.feijimiao.xianyuassistant.controller.dto.DeleteRAGDataReqDTO;
 import com.feijimiao.xianyuassistant.controller.dto.PutNewDataToRAGReqDTO;
@@ -10,6 +11,7 @@ import com.feijimiao.xianyuassistant.service.GoodsInfoService;
 import com.feijimiao.xianyuassistant.service.bo.RAGDataRespBO;
 import com.feijimiao.xianyuassistant.mapper.XianyuGoodsConfigMapper;
 import com.feijimiao.xianyuassistant.entity.XianyuGoodsConfig;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
@@ -24,6 +26,7 @@ import java.util.List;
  * @author IAMLZY
  * @date 2026/4/12 00:16
  */
+@Slf4j
 @RestController
 @RequestMapping("/ai")
 public class AIChatController {
@@ -32,6 +35,9 @@ public class AIChatController {
 
     @Autowired
     private DynamicAIChatClientManager dynamicAIChatClientManager;
+
+    @Autowired
+    private DynamicVectorStoreManager dynamicVectorStoreManager;
     
     @Autowired
     private GoodsInfoService goodsInfoService;
@@ -135,24 +141,99 @@ public class AIChatController {
         try {
             aiService.putDataToRAG(putNewDataToRAGReqDTO.getContent(), putNewDataToRAGReqDTO.getGoodsId());
             return ResultObject.success(null);
-        } catch (RuntimeException e) {
-            if (e.getMessage() != null && e.getMessage().contains("向量库未初始化")) {
-                return ResultObject.failed(1001, "请完成AI配置再上传资料");
-            }
-            throw e;
+        } catch (Exception e) {
+            return handleRAGException(e, "上传知识库资料");
         }
     }
 
     @PostMapping("/queryRAGData")
     public ResultObject<List<RAGDataRespBO>> queryRAGData(@RequestBody PutNewDataToRAGReqDTO req) {
-        List<RAGDataRespBO> data = aiService.queryRAGDataBygoodsId(req.getGoodsId());
-        return ResultObject.success(data);
+        try {
+            List<RAGDataRespBO> data = aiService.queryRAGDataBygoodsId(req.getGoodsId());
+            return ResultObject.success(data);
+        } catch (Exception e) {
+            return handleRAGException(e, "查询知识库资料");
+        }
     }
 
     @PostMapping("/deleteRAGData")
     public ResultObject<?> deleteRAGData(@RequestBody DeleteRAGDataReqDTO req) {
-        aiService.deleteRAGDataByDocumentId(req.getDocumentId());
-        return ResultObject.success(null);
+        try {
+            aiService.deleteRAGDataByDocumentId(req.getDocumentId());
+            return ResultObject.success(null);
+        } catch (Exception e) {
+            return handleRAGException(e, "删除知识库资料");
+        }
+    }
+
+    /**
+     * 统一把 Spring AI / Embedding 调用异常转换为可读提示，避免前端直接收到 500 + HTML 404
+     */
+    private <T> ResultObject<T> handleRAGException(Exception e, String actionName) {
+        String fullMsg = extractFullErrorMessage(e);
+        Integer httpStatus = extractHttpStatusCode(e);
+        log.warn("[AIChatController] {}异常(httpStatus={}): {}", actionName, httpStatus, fullMsg);
+
+        if (fullMsg.contains("向量库未初始化")) {
+            return ResultObject.failed(1001, "请完成AI配置再上传资料");
+        }
+
+        boolean is404 = (httpStatus != null && httpStatus == 404)
+                || (fullMsg.matches("(?s).*(?<!\\d)404(?!\\d).*")
+                    && (fullMsg.contains("Not Found") || fullMsg.contains("404 -") || fullMsg.contains("404 ")));
+        if (is404) {
+            String baseUrl = dynamicVectorStoreManager.getEffectiveBaseUrl();
+            return ResultObject.failed("当前AI服务商（" + baseUrl + "）不支持 Embedding 向量知识库接口(404)。"
+                    + "请前往【系统设置 -> AI服务配置 -> Embedding模型配置】单独填写支持向量化的服务（如阿里云百炼、硅基流动），"
+                    + "或直接使用上方无需向量库的【固定资料】功能");
+        }
+
+        boolean isAuthError = (httpStatus != null && (httpStatus == 401 || httpStatus == 403))
+                || fullMsg.contains("Unauthorized") || fullMsg.contains("InvalidApiKey")
+                || fullMsg.matches("(?s).*(?<!\\d)(401|403)\\s*-.*");
+        if (isAuthError) {
+            return ResultObject.failed("Embedding 向量接口鉴权失败，请检查【系统设置 -> AI服务配置】中的 API Key 是否正确");
+        }
+
+        // 剥离 HTML 标签并截断过长响应体
+        String cleanMsg = fullMsg.replaceAll("(?s)<[^>]*>", " ").replaceAll("\\s+", " ").trim();
+        if (cleanMsg.length() > 160) {
+            cleanMsg = cleanMsg.substring(0, 160) + "...";
+        }
+        return ResultObject.failed(actionName + "失败：" + (cleanMsg.isEmpty() ? "服务异常" : cleanMsg));
+    }
+
+    private Integer extractHttpStatusCode(Throwable t) {
+        Throwable cur = t;
+        int depth = 0;
+        while (cur != null && depth < 6) {
+            if (cur instanceof org.springframework.web.client.RestClientResponseException restEx) {
+                return restEx.getStatusCode().value();
+            }
+            if (cur instanceof org.springframework.web.reactive.function.client.WebClientResponseException webEx) {
+                return webEx.getStatusCode().value();
+            }
+            cur = cur.getCause();
+            depth++;
+        }
+        return null;
+    }
+
+    private String extractFullErrorMessage(Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        Throwable cur = t;
+        int depth = 0;
+        while (cur != null && depth < 5) {
+            if (cur.getMessage() != null && !cur.getMessage().isBlank()) {
+                if (sb.length() > 0) {
+                    sb.append(" | ");
+                }
+                sb.append(cur.getMessage());
+            }
+            cur = cur.getCause();
+            depth++;
+        }
+        return sb.toString();
     }
 
     @PostMapping("/saveFixedMaterial")

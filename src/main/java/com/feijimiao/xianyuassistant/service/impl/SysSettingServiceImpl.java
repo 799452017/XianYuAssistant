@@ -2,6 +2,7 @@ package com.feijimiao.xianyuassistant.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.feijimiao.xianyuassistant.config.rag.DynamicAIChatClientManager;
+import com.feijimiao.xianyuassistant.config.rag.DynamicVectorStoreManager;
 import com.feijimiao.xianyuassistant.entity.XianyuSysSetting;
 import com.feijimiao.xianyuassistant.mapper.XianyuSysSettingMapper;
 import com.feijimiao.xianyuassistant.service.SysSettingService;
@@ -31,12 +32,22 @@ public class SysSettingServiceImpl implements SysSettingService {
     /** AI相关配置键，变更时需要触发ChatClient重建 */
     private static final Set<String> AI_RELATED_KEYS = Set.of("ai_api_key", "ai_base_url", "ai_model");
 
+    /** 向量库相关配置键，变更时需要触发VectorStore热重建 */
+    private static final Set<String> VECTOR_STORE_RELATED_KEYS = Set.of(
+            "ai_api_key", "ai_base_url",
+            "ai_embedding_api_key", "ai_embedding_base_url", "ai_embedding_model"
+    );
+
     @Autowired
     private XianyuSysSettingMapper sysSettingMapper;
 
     @Autowired
     @Lazy
     private DynamicAIChatClientManager dynamicAIChatClientManager;
+
+    @Autowired
+    @Lazy
+    private DynamicVectorStoreManager dynamicVectorStoreManager;
 
     @Override
     public String getSettingValue(String settingKey) {
@@ -120,10 +131,18 @@ public class SysSettingServiceImpl implements SysSettingService {
             log.info("[SysSetting] 新增配置成功: key={}", reqBO.getSettingKey());
         }
 
+        String trimmedKey = reqBO.getSettingKey().trim();
+
         // 如果是AI相关配置，触发ChatClient重建
-        if (AI_RELATED_KEYS.contains(reqBO.getSettingKey().trim())) {
-            log.info("[SysSetting] AI配置变更，触发ChatClient重建: key={}", reqBO.getSettingKey());
+        if (AI_RELATED_KEYS.contains(trimmedKey)) {
+            log.info("[SysSetting] AI配置变更，触发ChatClient重建: key={}", trimmedKey);
             dynamicAIChatClientManager.forceRebuild();
+        }
+
+        // 如果是向量库相关配置，触发VectorStore热重建（立即生效，无需重启）
+        if (VECTOR_STORE_RELATED_KEYS.contains(trimmedKey)) {
+            log.info("[SysSetting] Embedding/AI配置变更，触发VectorStore重建: key={}", trimmedKey);
+            dynamicVectorStoreManager.forceRebuild();
         }
     }
 
@@ -133,15 +152,22 @@ public class SysSettingServiceImpl implements SysSettingService {
             throw new RuntimeException("配置键不能为空");
         }
 
+        String trimmedKey = settingKey.trim();
         LambdaQueryWrapper<XianyuSysSetting> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(XianyuSysSetting::getSettingKey, settingKey.trim());
+        wrapper.eq(XianyuSysSetting::getSettingKey, trimmedKey);
         sysSettingMapper.delete(wrapper);
-        log.info("[SysSetting] 删除配置成功: key={}", settingKey);
+        log.info("[SysSetting] 删除配置成功: key={}", trimmedKey);
 
         // 如果是AI相关配置，触发ChatClient重建
-        if (AI_RELATED_KEYS.contains(settingKey.trim())) {
-            log.info("[SysSetting] AI配置删除，触发ChatClient重建: key={}", settingKey);
+        if (AI_RELATED_KEYS.contains(trimmedKey)) {
+            log.info("[SysSetting] AI配置删除，触发ChatClient重建: key={}", trimmedKey);
             dynamicAIChatClientManager.forceRebuild();
+        }
+
+        // 如果是向量库相关配置，触发VectorStore重建
+        if (VECTOR_STORE_RELATED_KEYS.contains(trimmedKey)) {
+            log.info("[SysSetting] Embedding/AI配置删除，触发VectorStore重建: key={}", trimmedKey);
+            dynamicVectorStoreManager.forceRebuild();
         }
     }
 }

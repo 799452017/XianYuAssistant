@@ -11,12 +11,14 @@ import org.springframework.ai.vectorstore.SimpleVectorStore;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
@@ -47,6 +49,7 @@ public class DynamicVectorStoreManager {
     private String vectorStoreFilePath;
 
     @Autowired
+    @Lazy
     private SysSettingService sysSettingService;
 
     /** 当前 VectorStore 实例 */
@@ -95,8 +98,7 @@ public class DynamicVectorStoreManager {
             return null;
         }
 
-        String effectiveBaseUrl = (embeddingBaseUrl != null && !embeddingBaseUrl.trim().isEmpty())
-                ? embeddingBaseUrl.trim() : DEFAULT_BASE_URL;
+        String effectiveBaseUrl = DynamicAIChatClientManager.normalizeBaseUrl(embeddingBaseUrl);
         String effectiveModel = (embeddingModel != null && !embeddingModel.trim().isEmpty())
                 ? embeddingModel.trim() : DEFAULT_EMBEDDING_MODEL;
 
@@ -146,6 +148,17 @@ public class DynamicVectorStoreManager {
     }
 
     /**
+     * 获取当前实际生效的 Embedding Base URL（用于错误诊断提示）
+     */
+    public String getEffectiveBaseUrl() {
+        String embeddingBaseUrl = getSettingValue(EMBEDDING_BASE_URL_SETTING);
+        if (embeddingBaseUrl == null || embeddingBaseUrl.trim().isEmpty()) {
+            embeddingBaseUrl = getSettingValue(AI_BASE_URL_SETTING);
+        }
+        return DynamicAIChatClientManager.normalizeBaseUrl(embeddingBaseUrl);
+    }
+
+    /**
      * 强制重建 VectorStore（配置变更时调用）
      */
     public void forceRebuild() {
@@ -162,16 +175,33 @@ public class DynamicVectorStoreManager {
     }
 
     /**
-     * 保存向量数据到文件
+     * 保存向量数据到文件（兼容无参调用）
      */
     public void saveToFile() {
-        if (vectorStore instanceof SimpleVectorStore) {
-            try {
-                ((SimpleVectorStore) vectorStore).save(new File(vectorStoreFilePath));
-                log.debug("[VectorStore] 向量数据已保存到: {}", vectorStoreFilePath);
-            } catch (Exception e) {
-                log.warn("[VectorStore] 保存向量数据失败: {}", e.getMessage());
+        saveToFile(this.vectorStore);
+    }
+
+    /**
+     * 线程安全地将指定 VectorStore 实例持久化到文件（加写锁并采用临时文件原子替换，防止并发写坏或热重建丢数据）
+     */
+    public void saveToFile(VectorStore targetStore) {
+        if (!(targetStore instanceof SimpleVectorStore simpleStore)) {
+            return;
+        }
+        lock.writeLock().lock();
+        try {
+            Path targetPath = Paths.get(vectorStoreFilePath);
+            if (targetPath.getParent() != null && !Files.exists(targetPath.getParent())) {
+                Files.createDirectories(targetPath.getParent());
             }
+            Path tempPath = targetPath.resolveSibling(targetPath.getFileName().toString() + ".tmp");
+            simpleStore.save(tempPath.toFile());
+            Files.move(tempPath, targetPath, StandardCopyOption.REPLACE_EXISTING);
+            log.debug("[VectorStore] 向量数据已安全保存到: {}", vectorStoreFilePath);
+        } catch (Exception e) {
+            log.warn("[VectorStore] 保存向量数据失败: {}", e.getMessage());
+        } finally {
+            lock.writeLock().unlock();
         }
     }
 
