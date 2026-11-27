@@ -34,6 +34,15 @@ public interface CookieRefreshService {
      * @return 是否刷新成功
      */
     boolean refreshCookie(Long accountId);
+
+    /**
+     * 强制使用浏览器兜底刷新Cookie（用于hasLogin有效但h5api仍报令牌/会话过期的场景）
+     * 内部受账号级并发锁与冷却时间保护
+     *
+     * @param accountId 账号ID
+     * @return 是否刷新成功
+     */
+    boolean forceRefreshCookieWithBrowser(Long accountId);
     
     /**
      * 清理重复Cookie

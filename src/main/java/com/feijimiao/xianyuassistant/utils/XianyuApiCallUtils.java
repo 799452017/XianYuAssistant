@@ -90,11 +90,12 @@ public class XianyuApiCallUtils {
             }
 
             // 2. 【关键】处理响应中的Set-Cookie（参考Python: session自动处理 + clear_duplicate_cookies）
+            boolean cookieUpdatedFromResponse = false;
             List<String> setCookieHeaders = result.getSetCookieHeaders();
             if (!setCookieHeaders.isEmpty()) {
                 log.info("【账号{}】检测到响应中的Set-Cookie，数量: {}", accountId, setCookieHeaders.size());
                 // 更新Cookie到数据库
-                updateCookiesFromResponse(accountId, cookiesStr, setCookieHeaders);
+                cookieUpdatedFromResponse = updateCookiesFromResponse(accountId, cookiesStr, setCookieHeaders);
             }
 
             // 3. 解析响应
@@ -119,29 +120,50 @@ public class XianyuApiCallUtils {
 
             // 5. 检查是否需要刷新Cookie（令牌过期）
             if (isTokenExpired(retCode)) {
-                log.warn("【账号{}】检测到令牌过期，尝试自动刷新... (重试次数: {}/{})",
-                        accountId, retryCount, MAX_RETRY_COUNT);
+                log.warn("【账号{}】检测到令牌/会话过期: apiName={}, retCode={}, 尝试自动刷新... (重试次数: {}/{})",
+                        accountId, apiName, retCode, retryCount, MAX_RETRY_COUNT);
 
                 // 检查是否超过最大重试次数
                 if (retryCount >= MAX_RETRY_COUNT) {
-                    log.error("【账号{}】令牌刷新重试次数已达上限，停止重试", accountId);
-                    return new ApiCallResult(false, response, "令牌过期且自动刷新失败", true);
+                    log.error("【账号{}】令牌刷新重试次数已达上限，停止重试: apiName={}, retCode={}", accountId, apiName, retCode);
+                    return new ApiCallResult(false, response, "令牌过期且自动刷新失败(" + retCode + ")", true);
+                }
+
+                // 优先使用本次响应 Set-Cookie 下发的新 _m_h5_tk 直接重试，无需先走 hasLogin
+                if (cookieUpdatedFromResponse) {
+                    log.info("【账号{}】响应Set-Cookie已更新Cookie，直接使用新Cookie重试API: {}", accountId, apiName);
+                    Thread.sleep(RETRY_INTERVAL);
+                    String newCookieStr = accountService.getCookieByAccountId(accountId);
+                    if (newCookieStr != null && !newCookieStr.isEmpty()) {
+                        return callApiWithRetry(accountId, apiName, dataMap, newCookieStr, extraHeaders, extraQueryParams, retryCount + 1);
+                    }
                 }
 
                 // 尝试刷新Cookie
                 boolean refreshSuccess = cookieRefreshService.refreshCookie(accountId);
 
                 if (refreshSuccess) {
-                    log.info("【账号{}】Cookie刷新成功，准备重试API调用...", accountId);
+                    String newCookieStr = accountService.getCookieByAccountId(accountId);
+
+                    // hasLogin 返回登录有效但 Cookie 毫无变化时，h5api 的 _m_h5_tk/会话并未真正刷新，需触发浏览器兜底刷新
+                    if (newCookieStr != null && newCookieStr.equals(cookiesStr)) {
+                        log.warn("【账号{}】hasLogin返回有效但Cookie无变化，触发强制浏览器兜底刷新以更新_m_h5_tk/会话: apiName={}", accountId, apiName);
+                        boolean browserRefreshSuccess = cookieRefreshService.forceRefreshCookieWithBrowser(accountId);
+                        if (!browserRefreshSuccess) {
+                            log.warn("【账号{}】强制浏览器兜底刷新失败或处于冷却中，停止无效重试: apiName={}", accountId, apiName);
+                            return new ApiCallResult(false, response, "令牌过期，Cookie无变化且浏览器兜底刷新失败(" + retCode + ")", true);
+                        }
+                        newCookieStr = accountService.getCookieByAccountId(accountId);
+                    }
+
+                    log.info("【账号{}】Cookie刷新成功，准备重试API调用: {}", accountId, apiName);
 
                     // 等待一小段时间
                     Thread.sleep(RETRY_INTERVAL);
 
-                    // 获取新的Cookie
-                    String newCookieStr = accountService.getCookieByAccountId(accountId);
                     if (newCookieStr != null && !newCookieStr.isEmpty()) {
-                        // 递归调用，重试API
-                        return callApiWithRetry(accountId, apiName, dataMap, newCookieStr, retryCount + 1);
+                        // 递归调用，重试API（保留 extraHeaders 与 extraQueryParams）
+                        return callApiWithRetry(accountId, apiName, dataMap, newCookieStr, extraHeaders, extraQueryParams, retryCount + 1);
                     } else {
                         log.error("【账号{}】获取新Cookie失败", accountId);
                     }
@@ -149,7 +171,7 @@ public class XianyuApiCallUtils {
                     log.warn("【账号{}】Cookie自动刷新失败", accountId);
                 }
 
-                return new ApiCallResult(false, response, "令牌过期，自动刷新失败", true);
+                return new ApiCallResult(false, response, "令牌过期，自动刷新失败(" + retCode + ")", true);
             }
 
             // 6. 检查是否触发风控
@@ -176,7 +198,7 @@ public class XianyuApiCallUtils {
      * @param currentCookieStr 当前Cookie字符串
      * @param setCookieHeaders 响应中的Set-Cookie列表
      */
-    private void updateCookiesFromResponse(Long accountId, String currentCookieStr, List<String> setCookieHeaders) {
+    private boolean updateCookiesFromResponse(Long accountId, String currentCookieStr, List<String> setCookieHeaders) {
         try {
             // 合并Cookie
             String newCookieStr = mergeCookies(currentCookieStr, setCookieHeaders);
@@ -184,14 +206,24 @@ public class XianyuApiCallUtils {
             // 清理重复Cookie
             newCookieStr = cookieRefreshService.clearDuplicateCookies(newCookieStr);
 
-            // 更新数据库中的Cookie
-            if (!newCookieStr.equals(currentCookieStr)) {
-                accountService.updateCookie(accountId, newCookieStr);
-                log.info("【账号{}】Cookie已从响应Set-Cookie更新到数据库", accountId);
+            // 按键值 Map 比较，避免仅因顺序差异触发伪变更
+            Map<String, String> oldMap = XianyuSignUtils.parseCookies(currentCookieStr);
+            Map<String, String> newMap = XianyuSignUtils.parseCookies(newCookieStr);
+            if (!newMap.equals(oldMap)) {
+                boolean updated = accountService.updateCookie(accountId, newCookieStr);
+                if (updated) {
+                    log.info("【账号{}】Cookie已从响应Set-Cookie更新到数据库", accountId);
+                    String oldToken = oldMap.get("_m_h5_tk");
+                    String newToken = newMap.get("_m_h5_tk");
+                    // 仅当 _m_h5_tk 确实更新且写库成功时，才允许跳过 hasLogin 直接重试
+                    return newToken != null && !newToken.isEmpty() && !newToken.equals(oldToken);
+                }
+                log.warn("【账号{}】响应Set-Cookie写入数据库失败", accountId);
             }
         } catch (Exception e) {
             log.error("【账号{}】处理响应Set-Cookie失败", accountId, e);
         }
+        return false;
     }
 
     /**
@@ -249,6 +281,7 @@ public class XianyuApiCallUtils {
     private boolean isTokenExpired(String retCode) {
         return retCode.contains("FAIL_SYS_TOKEN_EXOIRED") ||  // 注意：API返回的拼写错误
                retCode.contains("FAIL_SYS_TOKEN_EXPIRED") ||
+               retCode.contains("FAIL_SYS_TOKEN_EMPTY") ||
                retCode.contains("FAIL_SYS_SESSION_EXPIRED") ||
                retCode.contains("令牌过期");
     }

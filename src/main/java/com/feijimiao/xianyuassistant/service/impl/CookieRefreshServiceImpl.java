@@ -406,6 +406,23 @@ public class CookieRefreshServiceImpl implements CookieRefreshService {
         }
     }
 
+    @Override
+    public boolean forceRefreshCookieWithBrowser(Long accountId) {
+        synchronized (getRefreshLock(accountId)) {
+            try {
+                log.info("【账号{}】触发强制浏览器兜底刷新Cookie（h5api令牌/会话失效）...", accountId);
+                boolean success = refreshCookieWithBrowser(accountId);
+                if (success) {
+                    updateAccountStatusToNormal(accountId, "浏览器强制兜底刷新Cookie成功，账号状态恢复正常");
+                }
+                return success;
+            } catch (Exception e) {
+                log.error("【账号{}】强制浏览器兜底刷新Cookie异常", accountId, e);
+                return false;
+            }
+        }
+    }
+
     private boolean refreshCookieWithBrowser(Long accountId) {
         Long lastTime = lastBrowserRefreshTime.get(accountId);
         if (lastTime != null && (System.currentTimeMillis() - lastTime) < BROWSER_REFRESH_COOLDOWN_MS) {
@@ -469,6 +486,8 @@ public class CookieRefreshServiceImpl implements CookieRefreshService {
             page.navigate(GOOFISH_IM_URL,
                     new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
             page.reload(new Page.ReloadOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
+            // 等待页面首屏 MTOP 请求完成，确保 h5api.m.goofish.com 下发新的 _m_h5_tk
+            page.waitForTimeout(2500);
 
             List<Cookie> refreshedCookies = context.cookies(List.of(
                     GOOFISH_IM_URL,
@@ -640,13 +659,14 @@ public class CookieRefreshServiceImpl implements CookieRefreshService {
         Map<String, String> cookies = new LinkedHashMap<>();
         String[] parts = cookieStr.split(";\\s*");
 
-        for (int i = parts.length - 1; i >= 0; i--) {
-            String part = parts[i];
+        for (String part : parts) {
             int idx = part.indexOf('=');
             if (idx > 0) {
-                String key = part.substring(0, idx);
-                String value = part.substring(idx + 1);
-                cookies.putIfAbsent(key, value);
+                String key = part.substring(0, idx).trim();
+                String value = part.substring(idx + 1).trim();
+                if (!key.isEmpty()) {
+                    cookies.put(key, value);
+                }
             }
         }
 

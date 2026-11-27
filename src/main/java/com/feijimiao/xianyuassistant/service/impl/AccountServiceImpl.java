@@ -299,9 +299,14 @@ public class AccountServiceImpl implements AccountService {
             cookieQuery.eq(XianyuCookie::getXianyuAccountId, accountId);
             XianyuCookie cookie = cookieMapper.selectOne(cookieQuery);
 
+            String mH5Tk = extractMH5TkFromCookie(cookieText);
+
             if (cookie != null) {
                 // 更新现有Cookie
                 cookie.setCookieText(cookieText);
+                if (mH5Tk != null && !mH5Tk.isEmpty()) {
+                    cookie.setMH5Tk(mH5Tk);
+                }
                 cookie.setCookieStatus(1);
                 cookie.setExpireTime(getFutureTimeString(30));
                 cookie.setUpdatedTime(getCurrentTimeString());
@@ -311,6 +316,7 @@ public class AccountServiceImpl implements AccountService {
                 cookie = new XianyuCookie();
                 cookie.setXianyuAccountId(accountId);
                 cookie.setCookieText(cookieText);
+                cookie.setMH5Tk(mH5Tk);
                 cookie.setCookieStatus(1);
                 cookie.setExpireTime(getFutureTimeString(30));
                 cookie.setCreatedTime(getCurrentTimeString());
