@@ -1,6 +1,11 @@
 package com.feijimiao.xianyuassistant.utils;
 
 import lombok.extern.slf4j.Slf4j;
+import okhttp3.Headers;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 import org.springframework.http.*;
 import org.springframework.web.client.RestTemplate;
 
@@ -8,6 +13,7 @@ import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * HTTP客户端工具类
@@ -16,6 +22,13 @@ import java.util.Map;
 public class HttpClientUtils {
 
     private static final RestTemplate restTemplate = new RestTemplate();
+
+    private static final OkHttpClient okHttpClient = new OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .build();
 
     /**
      * 发送POST请求
@@ -76,12 +89,6 @@ public class HttpClientUtils {
     public static HttpResponseResult postWithHeaders(String url, Map<String, String> headers, Map<String, String> body) {
         try {
             log.info("发送POST请求(带响应头): {}", url);
-            HttpHeaders httpHeaders = new HttpHeaders();
-            httpHeaders.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-
-            if (headers != null) {
-                headers.forEach(httpHeaders::add);
-            }
 
             // 构建表单数据
             StringBuilder formData = new StringBuilder();
@@ -98,20 +105,36 @@ public class HttpClientUtils {
                 });
             }
 
-            HttpEntity<String> entity = new HttpEntity<>(formData.toString(), httpHeaders);
-            log.info("开始执行HTTP请求...");
-            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.POST, entity, String.class);
+            RequestBody requestBody = RequestBody.create(
+                    formData.toString(),
+                    okhttp3.MediaType.parse("application/x-www-form-urlencoded; charset=UTF-8")
+            );
+            Request.Builder requestBuilder = new Request.Builder()
+                    .url(url)
+                    .post(requestBody);
 
-            log.info("HTTP请求完成，状态码: {}", response.getStatusCode());
-
-            HttpResponseResult result = new HttpResponseResult();
-            result.setBody(response.getBody());
-            result.setStatusCode(response.getStatusCode().value());
-            if (response.getHeaders() != null) {
-                result.setHeaders(response.getHeaders());
+            if (headers != null) {
+                headers.forEach(requestBuilder::header);
             }
 
-            return result;
+            log.info("开始执行HTTP请求...");
+            try (Response response = okHttpClient.newCall(requestBuilder.build()).execute()) {
+                int statusCode = response.code();
+                String responseBody = response.body() != null ? response.body().string() : "";
+                log.info("HTTP请求完成，状态码: {}", statusCode);
+
+                HttpHeaders responseHeaders = new HttpHeaders();
+                Headers okHeaders = response.headers();
+                for (int i = 0; i < okHeaders.size(); i++) {
+                    responseHeaders.add(okHeaders.name(i), okHeaders.value(i));
+                }
+
+                HttpResponseResult result = new HttpResponseResult();
+                result.setBody(responseBody);
+                result.setStatusCode(statusCode);
+                result.setHeaders(responseHeaders);
+                return result;
+            }
         } catch (Exception e) {
             log.error("HTTP POST请求失败(带响应头): url={}", url, e);
             return null;
